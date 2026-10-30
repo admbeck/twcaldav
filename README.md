@@ -46,13 +46,15 @@ mirrored on [GitHub](https://github.com/admbeck/twcaldav).
 
 ### Known limitations
 
-- Last write wins per task, not per field. If a task changes on both sides
-  between syncs, the older side's changes are lost.
-- Removing the note annotation in TaskWarrior doesn't delete the note in
-  CalDAV; the next sync brings it back.
-- A date-only DUE becomes a date-time (midnight UTC) once TaskWarrior writes
-  the task back.
-- RELATED-TO is kept, but not mapped to TaskWarrior `depends`.
+- **Upstream too:** Last write wins per task, not per field. If a task changes
+  on both sides between syncs, the older side's changes are lost.
+- **This fork only:** Removing the note annotation in TaskWarrior doesn't
+  delete the note in CalDAV; the next sync brings it back. Upstream has no note
+  annotation, so this can't happen there.
+- **Upstream too:** A date-only DUE becomes a date-time (midnight UTC) once
+  TaskWarrior writes the task back.
+- **Upstream too:** RELATED-TO isn't mapped to TaskWarrior `depends`. This fork
+  at least keeps it; upstream deletes it on every update from TaskWarrior.
 
 The rest of this README is upstream's, with the install commands pointing at
 this fork.
