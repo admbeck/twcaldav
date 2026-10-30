@@ -1,3 +1,13 @@
+## v1.4.0 (2026-10-30)
+
+### Feat
+
+- merge each field against the last synced state
+
+### Fix
+
+- keep unmapped task fields on updates from CalDAV
+
 ## v1.3.1 (2026-10-30)
 
 ### Fix
