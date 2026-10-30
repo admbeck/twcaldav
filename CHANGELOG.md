@@ -1,3 +1,9 @@
+## v1.4.3 (2026-10-30)
+
+### Fix
+
+- convert times with a timezone to UTC
+
 ## v1.4.2 (2026-10-30)
 
 ### Fix
