@@ -1,3 +1,9 @@
+## v1.4.4 (2026-10-30)
+
+### Fix
+
+- read dates without a time as local midnight
+
 ## v1.4.3 (2026-10-30)
 
 ### Fix
