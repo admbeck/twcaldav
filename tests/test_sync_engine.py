@@ -531,7 +531,7 @@ class TestSyncEngine:
 
         sync_engine._execute_update(pair)
 
-        mock_convert.assert_called_once_with(tw_task)
+        mock_convert.assert_called_once_with(tw_task, existing_description=None)
         assert mock_vtodo.uid == "cd-123"  # UID should be preserved
         mock_caldav.update_todo.assert_called_once()
         assert sync_engine.stats.caldav_updated == 1

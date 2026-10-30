@@ -7,6 +7,9 @@ from twcaldav.caldav_client import VTodo
 from twcaldav.taskwarrior import Task
 
 
+ANNOTATION_MARKER = "--- TaskWarrior Annotations ---"
+
+
 def _annotation_fingerprint(annotation: dict) -> str:
     """Create unique fingerprint for annotation deduplication.
 
@@ -54,11 +57,14 @@ def _merge_annotations(
     return merged
 
 
-def taskwarrior_to_caldav(task: Task) -> VTodo:
+def taskwarrior_to_caldav(task: Task, existing_description: str | None = None) -> VTodo:
     """Convert TaskWarrior task to CalDAV VTodo.
 
     Args:
         task: TaskWarrior Task object.
+        existing_description: DESCRIPTION of the CalDAV todo being updated
+            (optional). Any free-text note in it is carried over so an update
+            from TaskWarrior does not wipe notes written in a CalDAV client.
 
     Returns:
         CalDAV VTodo object.
@@ -86,8 +92,9 @@ def taskwarrior_to_caldav(task: Task) -> VTodo:
         priority_map = {"H": 1, "M": 5, "L": 9}
         priority = priority_map.get(task.priority, 5)
 
-    # Format description with annotations
-    description = _format_description_with_annotations(task)
+    # Format description: existing CalDAV note (if any) followed by annotations
+    note, _ = _parse_description_for_annotations(existing_description)
+    description = _compose_description(note, _format_description_with_annotations(task))
 
     # Map tags to categories (excluding project - project is managed by mapping config)
     categories = task.tags if task.tags else None
@@ -145,15 +152,11 @@ def caldav_to_taskwarrior(vtodo: VTodo, existing_task: Task | None = None) -> Ta
         else:
             priority = "L"
 
-    # Parse description for annotations
-    # If no description field, use summary as description
-    desc_field = vtodo.description if vtodo.description else None
-    description, new_annotations = _parse_description_for_annotations(desc_field)
-
-    # If we got empty description from parsing, use summary
-    # (annotations are stored separately in TaskWarrior)
-    if not description:
-        description = vtodo.summary
+    # The TaskWarrior description is always the CalDAV summary (the title).
+    # The CalDAV DESCRIPTION holds a free-text note plus the annotation block;
+    # only the annotations are imported, the note stays on the CalDAV side.
+    description = vtodo.summary
+    _, new_annotations = _parse_description_for_annotations(vtodo.description)
 
     # Merge annotations if existing_task provided (deduplication)
     if existing_task and existing_task.annotations:
@@ -189,6 +192,35 @@ def caldav_to_taskwarrior(vtodo: VTodo, existing_task: Task | None = None) -> Ta
     )
 
 
+def _compose_description(note: str, annotation_block: str | None) -> str | None:
+    """Join a free-text note and an annotation block into a DESCRIPTION value.
+
+    Args:
+        note: Free-text note (may be empty).
+        annotation_block: Output of _format_description_with_annotations.
+
+    Returns:
+        Combined string, or None if both parts are empty.
+    """
+    parts = [part for part in (note.strip(), annotation_block) if part]
+    return "\n".join(parts) if parts else None
+
+
+def extract_annotation_block(description: str | None) -> str:
+    """Return only the annotation block of a CalDAV DESCRIPTION.
+
+    Args:
+        description: CalDAV DESCRIPTION field.
+
+    Returns:
+        The marker and everything after it, stripped; empty string if the
+        description has no annotation block.
+    """
+    if not description or ANNOTATION_MARKER not in description:
+        return ""
+    return (ANNOTATION_MARKER + description.split(ANNOTATION_MARKER, 1)[1]).strip()
+
+
 def _format_description_with_annotations(task: Task) -> str | None:
     """Format task annotations for CalDAV description field.
 
@@ -204,7 +236,7 @@ def _format_description_with_annotations(task: Task) -> str | None:
     if not task.annotations:
         return None
 
-    lines = ["--- TaskWarrior Annotations ---"]
+    lines = [ANNOTATION_MARKER]
 
     for annotation in task.annotations:
         entry = annotation.get("entry", "")
@@ -257,7 +289,7 @@ def _parse_description_for_annotations(
         return "", None
 
     # Check for annotation marker
-    marker = "--- TaskWarrior Annotations ---"
+    marker = ANNOTATION_MARKER
     if marker not in description:
         # No annotations, return as-is
         return description, None

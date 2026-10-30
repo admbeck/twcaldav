@@ -124,14 +124,17 @@ class TaskComparator:
             return False
 
         # Compare annotations (stored in CalDAV description)
-        from twcaldav.field_mapper import _format_description_with_annotations
+        from twcaldav.field_mapper import (
+            _format_description_with_annotations,
+            extract_annotation_block,
+        )
 
         expected_caldav_description = _format_description_with_annotations(tw_task)
-        actual_caldav_description = caldav_todo.description
 
-        # Normalize None vs empty string
+        # Only the annotation block is synced; a free-text note on the CalDAV
+        # side is not part of the TaskWarrior task, so it is not compared.
         expected_desc = expected_caldav_description or ""
-        actual_desc = actual_caldav_description or ""
+        actual_desc = extract_annotation_block(caldav_todo.description)
 
         if expected_desc != actual_desc:
             self.logger.debug(

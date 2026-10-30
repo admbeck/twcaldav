@@ -317,8 +317,11 @@ class SyncEngine:
             )
 
             if not self.dry_run:
-                # Convert TaskWarrior task to CalDAV todo (preserving UID)
-                vtodo = taskwarrior_to_caldav(pair.tw_task)
+                # Convert TaskWarrior task to CalDAV todo (preserving UID and
+                # any note already on the CalDAV side)
+                vtodo = taskwarrior_to_caldav(
+                    pair.tw_task, existing_description=pair.caldav_todo.description
+                )
                 vtodo.uid = pair.caldav_todo.uid  # Preserve CalDAV UID
 
                 # Get the calendar

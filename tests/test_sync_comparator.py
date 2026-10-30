@@ -282,3 +282,85 @@ class TestTasksContentEqualDueDates:
         )
 
         assert comparator.tasks_content_equal(tw_task, caldav_todo) is False
+
+
+class TestTasksContentEqualNotes:
+    """A CalDAV note must not make an otherwise identical task look changed."""
+
+    def test_plain_note_is_ignored(self, comparator) -> None:
+        """TW title equals CalDAV summary; a note on CalDAV is not a difference."""
+        tw_task = Task(
+            uuid="test-uuid",
+            description="Hepatologist appointment",
+            status="pending",
+            entry=datetime(2025, 9, 6, 15, 24, 30),
+        )
+        caldav_todo = VTodo(
+            uid="test-cd-uid",
+            summary="Hepatologist appointment",
+            status="NEEDS-ACTION",
+            description="Ezgu Niat clinic",
+        )
+
+        assert comparator.tasks_content_equal(tw_task, caldav_todo) is True
+
+    def test_note_plus_matching_annotations_is_equal(self, comparator) -> None:
+        """Note in front of an annotation block that matches TW is equal."""
+        tw_task = Task(
+            uuid="test-uuid",
+            description="Title",
+            status="pending",
+            entry=datetime(2025, 9, 6, 15, 24, 30),
+            annotations=[{"entry": "20241117T103000Z", "description": "First"}],
+        )
+        caldav_todo = VTodo(
+            uid="test-cd-uid",
+            summary="Title",
+            status="NEEDS-ACTION",
+            description=(
+                "A note\n--- TaskWarrior Annotations ---\n20241117T103000Z|First"
+            ),
+        )
+
+        assert comparator.tasks_content_equal(tw_task, caldav_todo) is True
+
+    def test_note_plus_different_annotations_is_not_equal(self, comparator) -> None:
+        """Differing annotations are still a real difference."""
+        tw_task = Task(
+            uuid="test-uuid",
+            description="Title",
+            status="pending",
+            entry=datetime(2025, 9, 6, 15, 24, 30),
+            annotations=[{"entry": "20241117T103000Z", "description": "First"}],
+        )
+        caldav_todo = VTodo(
+            uid="test-cd-uid",
+            summary="Title",
+            status="NEEDS-ACTION",
+            description=(
+                "A note\n--- TaskWarrior Annotations ---\n20241117T103000Z|Other"
+            ),
+        )
+
+        assert comparator.tasks_content_equal(tw_task, caldav_todo) is False
+
+    def test_imported_task_with_note_converges(self, comparator) -> None:
+        """Regression: import of a todo with a note must compare equal afterwards.
+
+        Previously the note became the TW description, so the pair never
+        compared equal and was re-imported on every sync.
+        """
+        from twcaldav.field_mapper import caldav_to_taskwarrior
+
+        caldav_todo = VTodo(
+            uid="test-cd-uid",
+            summary="Hepatologist appointment",
+            status="NEEDS-ACTION",
+            description="Ezgu Niat clinic",
+            created=datetime(2025, 9, 6, 15, 24, 30),
+            last_modified=datetime(2025, 9, 7, 8, 0, 0),
+        )
+
+        imported = caldav_to_taskwarrior(caldav_todo)
+
+        assert comparator.tasks_content_equal(imported, caldav_todo) is True

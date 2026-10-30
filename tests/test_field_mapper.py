@@ -588,7 +588,76 @@ class TestCalDAVToTaskWarrior:
 
         task = caldav_to_taskwarrior(vtodo)
 
-        # User description is extracted but not used (TW uses summary)
-        assert task.description == "Some user description text"
+        # The note is not imported: TW uses the summary as its description
+        assert task.description == "Test"
         assert task.annotations is not None
         assert len(task.annotations) == 1
+
+
+class TestCalDAVNotes:
+    """Tests for how a CalDAV note (DESCRIPTION) interacts with the title."""
+
+    def test_note_does_not_replace_title(self) -> None:
+        """A plain note must not become the TaskWarrior description."""
+        vtodo = VTodo(
+            uid="test-uid",
+            summary="Hepatologist appointment",
+            description="Ezgu Niat clinic",
+            created=datetime.now(UTC),
+        )
+
+        task = caldav_to_taskwarrior(vtodo)
+
+        assert task.description == "Hepatologist appointment"
+        assert task.annotations is None
+
+    def test_taskwarrior_to_caldav_preserves_existing_note(self) -> None:
+        """Updating CalDAV from TW must keep the note already on the server."""
+        task = Task(
+            uuid="tw-uuid",
+            description="Hepatologist appointment",
+            status="pending",
+            entry=datetime.now(UTC),
+        )
+
+        vtodo = taskwarrior_to_caldav(task, existing_description="Ezgu Niat clinic")
+
+        assert vtodo.summary == "Hepatologist appointment"
+        assert vtodo.description == "Ezgu Niat clinic"
+
+    def test_taskwarrior_to_caldav_keeps_note_before_annotations(self) -> None:
+        """The note stays in front of the annotation block and round-trips."""
+        task = Task(
+            uuid="tw-uuid",
+            description="Title",
+            status="pending",
+            entry=datetime.now(UTC),
+            annotations=[{"entry": "20241117T103000Z", "description": "First"}],
+        )
+
+        vtodo = taskwarrior_to_caldav(task, existing_description="My note")
+
+        assert vtodo.description == (
+            "My note\n--- TaskWarrior Annotations ---\n20241117T103000Z|First"
+        )
+        back = caldav_to_taskwarrior(vtodo)
+        assert back.description == "Title"
+        assert back.annotations == [
+            {"entry": "20241117T103000Z", "description": "First"}
+        ]
+
+    def test_existing_note_with_old_annotations_is_replaced_not_duplicated(
+        self,
+    ) -> None:
+        """Only the note is carried over; the annotation block is rebuilt from TW."""
+        task = Task(
+            uuid="tw-uuid",
+            description="Title",
+            status="pending",
+            entry=datetime.now(UTC),
+        )
+        existing = "My note\n--- TaskWarrior Annotations ---\n20241117T103000Z|Stale"
+
+        vtodo = taskwarrior_to_caldav(task, existing_description=existing)
+
+        assert vtodo.description == "My note"
