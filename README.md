@@ -5,6 +5,60 @@
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
+## About this fork
+
+This is a fork of [pcaro90/twcaldav](https://github.com/pcaro90/twcaldav), based
+on upstream v1.2.0. It lives at
+[git.admbeck.site/beck/twcaldav](https://git.admbeck.site/beck/twcaldav) and is
+mirrored on [GitHub](https://github.com/admbeck/twcaldav).
+
+### What's different
+
+- **Titles stay titles (v1.3.0).** Upstream took the TaskWarrior description
+  from a todo's DESCRIPTION (its note) whenever it had one, but compared it
+  against SUMMARY. A todo with a note lost its title to the note and was
+  re-imported on every sync. Here the TaskWarrior description always comes
+  from SUMMARY.
+- **Notes become an annotation (v1.3.0).** The free-text note of a CalDAV todo
+  is imported as one annotation, dated one second before the task's entry so
+  it can't collide with real annotations. Editing the note in CalDAV replaces
+  the annotation and deleting it removes it. It's written back as plain text.
+- **Readable annotations (v1.3.0).** Annotations are written to the CalDAV
+  description as
+
+  ```
+  Taskwarrior annotations:
+  [2026-01-02 09:00:00 UTC] text
+    continuation of a multi-line annotation
+  ```
+
+  instead of `--- TaskWarrior Annotations ---` followed by `TIMESTAMP|TEXT`
+  lines. The old format is still read, and is rewritten the next time
+  TaskWarrior updates the todo.
+- **Updates keep CalDAV-only data (v1.3.1).** Upstream rebuilt the whole todo on
+  every update from TaskWarrior, which dropped reminders (VALARM), subtask
+  links (RELATED-TO), client properties such as X-APPLE-SORT-ORDER, and the
+  calendar's VTIMEZONE. Updates now edit the existing todo in place.
+  PERCENT-COMPLETE follows the status, DTSTAMP is refreshed and SEQUENCE is
+  incremented.
+- **CI.** Codecov is removed, and the tests can also be started by hand with
+  `gh workflow run test.yml`.
+
+### Known limitations
+
+- Last write wins per task, not per field. If a task changes on both sides
+  between syncs, the older side's changes are lost.
+- Removing the note annotation in TaskWarrior doesn't delete the note in
+  CalDAV; the next sync brings it back.
+- A date-only DUE becomes a date-time (midnight UTC) once TaskWarrior writes
+  the task back.
+- RELATED-TO is kept, but not mapped to TaskWarrior `depends`.
+
+The rest of this README is upstream's, with the install commands pointing at
+this fork.
+
+---
+
 Bidirectional synchronization between TaskWarrior and CalDAV servers.
 
 > [!WARNING]
@@ -39,21 +93,21 @@ Bidirectional synchronization between TaskWarrior and CalDAV servers.
 ### Using uv
 
 ```bash
-uv tool install git+https://github.com/pcaro90/twcaldav
+uv tool install git+https://github.com/admbeck/twcaldav
 twcaldav --version
 ```
 
 ### Using pipx
 
 ```bash
-pipx install git+https://github.com/pcaro90/twcaldav
+pipx install git+https://github.com/admbeck/twcaldav
 twcaldav --version
 ```
 
 ### Run using uvx (without installing)
 
 ```bash
-uvx --from git+https://github.com/pcaro90/twcaldav.git twcaldav --version
+uvx --from git+https://github.com/admbeck/twcaldav.git twcaldav --version
 ```
 
 ## Quick Start
@@ -143,7 +197,7 @@ systemctl --user enable --now twcaldav.timer
 | priority         | PRIORITY (H→1, M→5, L→9)                           |
 | project          | CATEGORIES                                         |
 | tags             | CATEGORIES                                         |
-| annotations      | DESCRIPTION                                        |
+| annotations      | DESCRIPTION (note → one annotation, rest in block) |
 | caldav_uid (UDA) | UID (unique identifier)                            |
 
 ## Testing
