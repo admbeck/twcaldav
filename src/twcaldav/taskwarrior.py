@@ -3,11 +3,41 @@
 import json
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from twcaldav.logger import get_logger
+
+
+def to_utc(value: datetime) -> datetime:
+    """Return a datetime as the same instant in UTC.
+
+    Naive values (floating times, and date-only values read from CalDAV)
+    have no timezone to convert from and are taken to be UTC already.
+
+    Args:
+        value: Datetime to convert.
+
+    Returns:
+        Aware datetime in UTC.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _tw_timestamp(value: datetime) -> str:
+    """Format a datetime for TaskWarrior.
+
+    Args:
+        value: Datetime to format.
+
+    Returns:
+        UTC timestamp like 20250815T073001Z.
+    """
+    return to_utc(value).strftime("%Y%m%dT%H%M%SZ")
+
 
 # Export fields Task models itself.
 _MAPPED_FIELDS = frozenset(
@@ -120,21 +150,21 @@ class Task:
             "uuid": self.uuid,
             "description": self.description,
             "status": self.status,
-            "entry": self.entry.strftime("%Y%m%dT%H%M%SZ"),
+            "entry": _tw_timestamp(self.entry),
         }
 
         if self.modified:
-            data["modified"] = self.modified.strftime("%Y%m%dT%H%M%SZ")
+            data["modified"] = _tw_timestamp(self.modified)
         if self.project:
             data["project"] = self.project
         if self.due:
-            data["due"] = self.due.strftime("%Y%m%dT%H%M%SZ")
+            data["due"] = _tw_timestamp(self.due)
         if self.scheduled:
-            data["scheduled"] = self.scheduled.strftime("%Y%m%dT%H%M%SZ")
+            data["scheduled"] = _tw_timestamp(self.scheduled)
         if self.wait:
-            data["wait"] = self.wait.strftime("%Y%m%dT%H%M%SZ")
+            data["wait"] = _tw_timestamp(self.wait)
         if self.end:
-            data["end"] = self.end.strftime("%Y%m%dT%H%M%SZ")
+            data["end"] = _tw_timestamp(self.end)
         if self.priority:
             data["priority"] = self.priority
         if self.tags:
@@ -357,7 +387,7 @@ class TaskWarrior:
                 cmd_args.append(f"{key}:{','.join(value)}")
             elif isinstance(value, datetime):
                 # For dates
-                cmd_args.append(f"{key}:{value.strftime('%Y%m%dT%H%M%SZ')}")
+                cmd_args.append(f"{key}:{_tw_timestamp(value)}")
             else:
                 cmd_args.append(f"{key}:{value}")
 

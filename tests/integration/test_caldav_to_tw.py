@@ -2,6 +2,7 @@
 
 import time
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -871,3 +872,29 @@ def test_caldav_to_tw_cancelled_no_tw_task(clean_test_environment) -> None:
     # Verify no TW task was created
     tasks = get_tasks()
     assert len(tasks) == 0, "Orphaned CANCELLED todo should not create TW task"
+
+
+@pytest.mark.integration
+def test_caldav_to_tw_due_with_timezone(clean_test_environment) -> None:
+    """A due time with a TZID syncs as the same instant, and stays put."""
+    _, principal = get_caldav_client()
+    assert principal is not None
+    calendar = get_calendar(principal)
+    assert calendar is not None
+
+    summary = "CalDAV todo due in Tashkent"
+    due = datetime(2030, 8, 15, 12, 30, tzinfo=ZoneInfo("Asia/Tashkent"))
+    assert create_todo(calendar, summary, due=due)
+    assert run_sync()
+
+    tasks = get_tasks()
+    assert len(tasks) == 1
+    assert tasks[0]["due"] == "20300815T073000Z"
+    first_modified = tasks[0]["modified"]
+
+    time.sleep(2)
+    assert run_sync()
+
+    tasks = get_tasks()
+    assert tasks[0]["due"] == "20300815T073000Z"
+    assert tasks[0]["modified"] == first_modified

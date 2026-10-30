@@ -16,7 +16,7 @@ from twcaldav.sync_merge import (
     snapshots_differ,
 )
 from twcaldav.sync_types import SyncAction, SyncDirection, TaskPair
-from twcaldav.taskwarrior import Task
+from twcaldav.taskwarrior import Task, to_utc
 
 
 class SyncClassifier:
@@ -281,7 +281,7 @@ class SyncClassifier:
             return True
         if tw_modified is None:
             return False
-        return tw_modified.replace(tzinfo=None) > caldav_modified.replace(tzinfo=None)
+        return to_utc(tw_modified) > to_utc(caldav_modified)
 
     def _resolve_conflict(self, tw_task: Task, caldav_todo: VTodo) -> TaskPair:
         tw_modified = tw_task.modified or tw_task.entry
@@ -318,15 +318,9 @@ class SyncClassifier:
             )
 
         # Both have timestamps - compare (Last Write Wins)
-        # Make timezone-naive for comparison
-        tw_timestamp = (
-            tw_modified.replace(tzinfo=None) if tw_modified.tzinfo else tw_modified
-        )
-        caldav_timestamp = (
-            caldav_modified.replace(tzinfo=None)
-            if caldav_modified.tzinfo
-            else caldav_modified
-        )
+        # Compare as UTC instants
+        tw_timestamp = to_utc(tw_modified)
+        caldav_timestamp = to_utc(caldav_modified)
 
         # Log timestamp comparisons for debugging
         time_diff = abs((tw_timestamp - caldav_timestamp).total_seconds())

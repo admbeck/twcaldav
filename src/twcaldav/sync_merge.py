@@ -24,7 +24,7 @@ from twcaldav.field_mapper import (
     parse_annotations,
     split_note_annotation,
 )
-from twcaldav.taskwarrior import Task
+from twcaldav.taskwarrior import Task, to_utc
 
 BASE_VERSION = 1
 
@@ -59,7 +59,7 @@ Snapshot = dict[str, Any]
 def _timestamp(value: datetime | None) -> str | None:
     """Return a datetime as a comparable string.
 
-    The timezone is dropped, not converted, matching TaskComparator.
+    Converted to UTC, so the same instant in different zones is equal.
 
     Args:
         value: Datetime or None.
@@ -69,7 +69,7 @@ def _timestamp(value: datetime | None) -> str | None:
     """
     if value is None:
         return None
-    return value.replace(tzinfo=None).isoformat()
+    return to_utc(value).replace(tzinfo=None).isoformat()
 
 
 def _snapshot(

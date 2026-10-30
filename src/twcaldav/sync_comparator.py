@@ -1,8 +1,22 @@
 """Task comparison logic for synchronization."""
 
+from datetime import datetime
+
 from twcaldav.caldav_client import VTodo
 from twcaldav.logger import get_logger
-from twcaldav.taskwarrior import Task
+from twcaldav.taskwarrior import Task, to_utc
+
+
+def _instant(value: datetime | None) -> datetime | None:
+    """Return a datetime as a naive UTC instant for comparison.
+
+    Args:
+        value: Datetime or None.
+
+    Returns:
+        Naive datetime in UTC, or None.
+    """
+    return to_utc(value).replace(tzinfo=None) if value else None
 
 
 class TaskComparator:
@@ -47,20 +61,16 @@ class TaskComparator:
             )
             return False
 
-        # Compare due date (handle None and timezone differences)
-        tw_due = tw_task.due.replace(tzinfo=None) if tw_task.due else None
-        cd_due = caldav_todo.due.replace(tzinfo=None) if caldav_todo.due else None
+        # Compare due date (as UTC instants)
+        tw_due = _instant(tw_task.due)
+        cd_due = _instant(caldav_todo.due)
         if tw_due != cd_due:
             self.logger.debug(f"Content differs: due - TW:{tw_due} vs CD:{cd_due}")
             return False
 
-        # Compare scheduled/dtstart (handle None and timezone differences)
-        tw_scheduled = (
-            tw_task.scheduled.replace(tzinfo=None) if tw_task.scheduled else None
-        )
-        cd_dtstart = (
-            caldav_todo.dtstart.replace(tzinfo=None) if caldav_todo.dtstart else None
-        )
+        # Compare scheduled/dtstart (as UTC instants)
+        tw_scheduled = _instant(tw_task.scheduled)
+        cd_dtstart = _instant(caldav_todo.dtstart)
         if tw_scheduled != cd_dtstart:
             self.logger.debug(
                 f"Content differs: scheduled/dtstart - "
@@ -68,22 +78,18 @@ class TaskComparator:
             )
             return False
 
-        # Compare wait (handle None and timezone differences)
-        tw_wait = tw_task.wait.replace(tzinfo=None) if tw_task.wait else None
-        cd_wait = caldav_todo.wait.replace(tzinfo=None) if caldav_todo.wait else None
+        # Compare wait (as UTC instants)
+        tw_wait = _instant(tw_task.wait)
+        cd_wait = _instant(caldav_todo.wait)
         if tw_wait != cd_wait:
             self.logger.debug(f"Content differs: wait - TW:{tw_wait} vs CD:{cd_wait}")
             return False
 
-        # Compare end/completed timestamp (handle None and timezone differences)
+        # Compare end/completed timestamp (as UTC instants)
         # Only compare if both tasks are completed status
         if tw_task.status == "completed" and caldav_todo.status == "COMPLETED":
-            tw_end = tw_task.end.replace(tzinfo=None) if tw_task.end else None
-            cd_completed = (
-                caldav_todo.completed.replace(tzinfo=None)
-                if caldav_todo.completed
-                else None
-            )
+            tw_end = _instant(tw_task.end)
+            cd_completed = _instant(caldav_todo.completed)
             # Only consider it a difference if BOTH have completion timestamps
             # If CalDAV lacks the COMPLETED timestamp, the status already indicates
             # completion, so don't treat this as a content difference

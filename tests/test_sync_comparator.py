@@ -1,6 +1,7 @@
 """Tests for the sync comparator module."""
 
-from datetime import datetime
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -440,3 +441,38 @@ class TestTasksContentEqualAnnotationFormats:
         )
 
         assert comparator.tasks_content_equal(tw_task, caldav_todo) is True
+
+
+class TestTasksContentEqualTimezones:
+    """Tests for comparing times that carry a timezone."""
+
+    TASHKENT = ZoneInfo("Asia/Tashkent")
+
+    def _pair(self, tw_due: datetime, cd_due: datetime) -> tuple[Task, VTodo]:
+        tw_task = Task(
+            uuid="test-uuid",
+            description="Haircut",
+            status="pending",
+            entry=datetime(2025, 8, 1, tzinfo=UTC),
+            due=tw_due,
+        )
+        caldav_todo = VTodo(uid="cd-uid", summary="Haircut", due=cd_due)
+        return tw_task, caldav_todo
+
+    def test_same_instant_in_different_zones_is_equal(self, comparator) -> None:
+        """12:30 in Tashkent and 07:30 UTC are the same due time."""
+        tw_task, caldav_todo = self._pair(
+            datetime(2025, 8, 15, 7, 30, tzinfo=UTC),
+            datetime(2025, 8, 15, 12, 30, tzinfo=self.TASHKENT),
+        )
+
+        assert comparator.tasks_content_equal(tw_task, caldav_todo)
+
+    def test_same_wall_time_in_different_zones_differs(self, comparator) -> None:
+        """12:30 UTC is not 12:30 in Tashkent."""
+        tw_task, caldav_todo = self._pair(
+            datetime(2025, 8, 15, 12, 30, tzinfo=UTC),
+            datetime(2025, 8, 15, 12, 30, tzinfo=self.TASHKENT),
+        )
+
+        assert not comparator.tasks_content_equal(tw_task, caldav_todo)

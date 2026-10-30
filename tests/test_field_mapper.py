@@ -1,6 +1,6 @@
 """Tests for field mapping module."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from twcaldav.caldav_client import VTodo
 from twcaldav.field_mapper import (
@@ -269,6 +269,14 @@ class TestCalDAVToTaskWarrior:
         assert task.project is None
         assert task.tags == ["work", "urgent"]
         assert task.priority == "H"
+
+    def test_missing_timestamps_default_to_utc_now(self) -> None:
+        """Without CREATED or LAST-MODIFIED, entry and modified are aware UTC."""
+        task = caldav_to_taskwarrior(VTodo(uid="caldav-uid-123", summary="Task"))
+
+        assert task.entry.utcoffset() == timedelta(0)
+        assert task.modified.utcoffset() == timedelta(0)
+        assert abs(datetime.now(UTC) - task.entry) < timedelta(minutes=1)
 
     def test_update_keeps_unmapped_task_fields(self) -> None:
         """Fields CalDAV doesn't carry, like depends, survive an update."""

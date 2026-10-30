@@ -1,7 +1,7 @@
 """Field mapping between TaskWarrior and CalDAV."""
 
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from twcaldav.caldav_client import VTodo
@@ -175,7 +175,9 @@ def caldav_to_taskwarrior(vtodo: VTodo, existing_task: Task | None = None) -> Ta
     priority = caldav_priority_to_tw(vtodo.priority)
 
     # Preserve entry timestamp from existing task or use created
-    entry = existing_task.entry if existing_task else (vtodo.created or datetime.now())
+    entry = (
+        existing_task.entry if existing_task else (vtodo.created or datetime.now(UTC))
+    )
 
     # The TaskWarrior description is always the CalDAV summary (the title).
     # The CalDAV DESCRIPTION holds a free-text note plus the annotation block;
@@ -217,7 +219,7 @@ def caldav_to_taskwarrior(vtodo: VTodo, existing_task: Task | None = None) -> Ta
         description=description,
         status=status,
         entry=entry,
-        modified=vtodo.last_modified or datetime.now(),
+        modified=vtodo.last_modified or datetime.now(UTC),
         project=None,  # Project will be set by sync engine based on calendar mapping
         due=vtodo.due,
         scheduled=vtodo.dtstart,

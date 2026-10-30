@@ -54,6 +54,12 @@ mirrored on [GitHub](https://github.com/admbeck/twcaldav).
 - **TaskWarrior-only fields survive updates (v1.4.0).** `task import` replaces
   the whole task, so upstream dropped `start`, `depends`, `recur` and other UDAs
   whenever CalDAV updated a task. They're now written back.
+- **Times with a timezone (v1.4.3).** Upstream wrote a CalDAV time with a TZID
+  (`DUE;TZID=Asia/Tashkent:...T123000`) to TaskWarrior as that wall time in UTC,
+  hours off, and compared times by dropping the timezone, so the shift was never
+  noticed. Times are now converted to UTC. Tasks synced by older versions are
+  corrected from CalDAV on the next sync. Date-only and floating times still
+  count as UTC.
 - **CI.** Codecov is removed, and the tests can also be started by hand with
   `gh workflow run test.yml`.
 
@@ -62,8 +68,6 @@ mirrored on [GitHub](https://github.com/admbeck/twcaldav).
 - **Upstream too:** If the same field changes differently on both sides between
   syncs, the side modified last wins. Upstream does this for the whole task, not
   just the field.
-- **This fork only:** A task first synced by an older version has no base yet,
-  so its first sync after upgrading still uses last write wins per task.
 - **Upstream too:** A date-only DUE becomes a date-time (midnight UTC) once
   TaskWarrior writes the task back.
 - **Upstream too:** RELATED-TO isn't mapped to TaskWarrior `depends`. This fork

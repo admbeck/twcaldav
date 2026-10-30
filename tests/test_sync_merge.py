@@ -1,11 +1,16 @@
 """Tests for the three-way merge of TaskWarrior tasks and CalDAV todos."""
 
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from twcaldav.caldav_client import VTodo
-from twcaldav.field_mapper import note_entry, taskwarrior_to_caldav
+from twcaldav.field_mapper import (
+    caldav_to_taskwarrior,
+    note_entry,
+    taskwarrior_to_caldav,
+)
 from twcaldav.sync_comparator import TaskComparator
 from twcaldav.sync_merge import (
     build_merged_task,
@@ -99,6 +104,18 @@ class TestSnapshot:
 
         assert content_equal == (snapshot_from_task(task) == snapshot_from_todo(todo))
         assert not content_equal
+
+
+class TestSnapshotTimezones:
+    """Tests for snapshots of times that carry a timezone."""
+
+    def test_aware_todo_matches_the_task_built_from_it(self, todo: VTodo) -> None:
+        """A Tashkent due and the UTC task due imported from it are equal."""
+        todo.due = datetime(2025, 8, 15, 12, 30, 1, tzinfo=ZoneInfo("Asia/Tashkent"))
+        task = Task.from_dict(caldav_to_taskwarrior(todo).to_dict())
+
+        assert snapshot_from_task(task) == snapshot_from_todo(todo)
+        assert snapshot_from_todo(todo)["due"] == "2025-08-15T07:30:01"
 
 
 class TestBaseEncoding:

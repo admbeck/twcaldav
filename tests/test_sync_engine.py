@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -1008,3 +1009,34 @@ class TestThreeWayMerge:
         assert imported.caldav_uid == created.uid
         assert decode_base(imported.caldav_base) == snapshot_from_task(task)
         assert task.caldav_uid is None
+
+
+class TestTimezoneMigration:
+    """Tests for healing times stored shifted by older versions."""
+
+    TASHKENT = ZoneInfo("Asia/Tashkent")
+
+    def test_shifted_due_is_corrected_from_caldav(self, sync_engine) -> None:
+        """A Tashkent due stored as wall-time-UTC is fixed in TaskWarrior only."""
+        task, todo = _synced_pair()
+        todo.due = datetime(2025, 8, 15, 12, 30, 1, tzinfo=self.TASHKENT)
+        # What older versions stored, and recorded as the base
+        task.due = datetime(2025, 8, 15, 12, 30, 1, tzinfo=UTC)
+        base = snapshot_from_task(task)
+        task.caldav_base = encode_base(base)
+
+        pair = sync_engine.classifier.classify(task, todo)
+
+        assert pair.direction == SyncDirection.CALDAV_TO_TW
+        assert not pair.write_caldav
+        assert pair.merged.to_dict()["due"] == "20250815T073001Z"
+        fixed = Task.from_dict(pair.merged.to_dict())
+        assert sync_engine.classifier.classify(fixed, todo).action == SyncAction.SKIP
+
+    def test_tw_is_newer_compares_instants(self, sync_engine) -> None:
+        """10:00 UTC is later than 12:00 in Tashkent (07:00 UTC)."""
+        task, todo = _synced_pair()
+        task.modified = datetime(2026, 1, 5, 10, 0, 0, tzinfo=UTC)
+        todo.last_modified = datetime(2026, 1, 5, 12, 0, 0, tzinfo=self.TASHKENT)
+
+        assert sync_engine.classifier._tw_is_newer(task, todo)

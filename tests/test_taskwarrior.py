@@ -4,6 +4,7 @@ import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from unittest.mock import Mock, patch
 
 import pytest
@@ -103,6 +104,34 @@ class TestTask:
         assert data["priority"] == "H"
         assert data["tags"] == ["important", "urgent"]
         assert len(data["annotations"]) == 1
+
+    def test_to_dict_converts_times_to_utc(self) -> None:
+        """A time with a timezone is written as the same instant in UTC."""
+        task = Task(
+            uuid="12345678-1234-1234-1234-123456789012",
+            description="Haircut",
+            status="pending",
+            entry=datetime(2025, 8, 1, 0, 0, 0, tzinfo=UTC),
+            due=datetime(2025, 8, 15, 12, 30, 1, tzinfo=ZoneInfo("Asia/Tashkent")),
+            scheduled=datetime(2025, 8, 15, 9, 0, 0, tzinfo=ZoneInfo("Europe/Berlin")),
+        )
+
+        data = task.to_dict()
+
+        assert data["due"] == "20250815T073001Z"
+        assert data["scheduled"] == "20250815T070000Z"
+
+    def test_to_dict_keeps_naive_times(self) -> None:
+        """A time without a timezone (date-only or floating) counts as UTC."""
+        task = Task(
+            uuid="12345678-1234-1234-1234-123456789012",
+            description="Task",
+            status="pending",
+            entry=datetime(2025, 8, 1, 0, 0, 0, tzinfo=UTC),
+            due=datetime(2025, 8, 15, 0, 0, 0),
+        )
+
+        assert task.to_dict()["due"] == "20250815T000000Z"
 
     def test_from_dict_keeps_unmapped_fields(self) -> None:
         """Fields twcaldav doesn't model are kept in extra."""
