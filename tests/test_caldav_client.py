@@ -1,6 +1,6 @@
 """Tests for CalDAV client module."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock, patch
 
 import pytest
@@ -372,3 +372,208 @@ class TestCalDAVClient:
 
         with pytest.raises(CalDAVError, match="Todo not found"):
             client.cancel_todo("Work", "nonexistent-uid")
+
+
+EXISTING_ICS = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:+//IDN tasks.org//android-140100//EN
+BEGIN:VTIMEZONE
+TZID:Asia/Tashkent
+BEGIN:STANDARD
+TZOFFSETFROM:+0500
+TZOFFSETTO:+0500
+TZNAME:+05
+DTSTART:19700101T000000
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VTODO
+UID:test-uid-123
+DTSTAMP:20260101T000000Z
+SEQUENCE:3
+SUMMARY:Old title
+STATUS:NEEDS-ACTION
+DESCRIPTION:Old note
+PRIORITY:9
+DUE;TZID=Asia/Tashkent:20260725T110001
+PERCENT-COMPLETE:0
+RELATED-TO;RELTYPE=PARENT:parent-uid-456
+X-APPLE-SORT-ORDER:123456
+X-MOZ-SNOOZE-TIME:20260724T100000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:Default Tasks.org description
+TRIGGER;RELATED=END:PT0S
+END:VALARM
+END:VTODO
+END:VCALENDAR
+"""
+
+
+def _client_with_todo(mock_dav_client, ics: str) -> tuple[CalDAVClient, Mock]:
+    """Build a CalDAVClient whose 'Work' calendar holds one todo with this data."""
+    mock_todo = Mock()
+    mock_todo.data = ics.replace("\n", "\r\n").encode()
+    mock_todo.save = Mock()
+
+    mock_calendar = Mock()
+    mock_calendar.id = "Work"
+    mock_calendar.todos.return_value = [mock_todo]
+
+    mock_principal = Mock()
+    mock_principal.calendars.return_value = [mock_calendar]
+
+    mock_client_instance = Mock()
+    mock_client_instance.principal.return_value = mock_principal
+    mock_dav_client.return_value = mock_client_instance
+
+    client = CalDAVClient(
+        url="https://caldav.example.com", username="user", password="pass"
+    )
+    return client, mock_todo
+
+
+def _saved_todo(mock_todo: Mock) -> tuple[Calendar, Todo]:
+    """Return the saved calendar and its VTODO component."""
+    cal = Calendar.from_ical(mock_todo.data)
+    return cal, next(iter(cal.walk("VTODO")))
+
+
+class TestUpdateTodo:
+    """Tests for updating an existing todo in place."""
+
+    @patch("caldav.DAVClient")
+    def test_updates_mapped_properties(self, mock_dav_client) -> None:
+        """Mapped properties take the new values."""
+        client, mock_todo = _client_with_todo(mock_dav_client, EXISTING_ICS)
+
+        client.update_todo(
+            "Work",
+            VTodo(
+                uid="test-uid-123",
+                summary="New title",
+                status="NEEDS-ACTION",
+                description="New note",
+                due=datetime(2026, 8, 1, 9, 0, 0, tzinfo=UTC),
+                priority=1,
+            ),
+        )
+
+        mock_todo.save.assert_called_once()
+        _, todo = _saved_todo(mock_todo)
+        assert str(todo["SUMMARY"]) == "New title"
+        assert str(todo["DESCRIPTION"]) == "New note"
+        assert todo["PRIORITY"] == 1
+        assert todo.decoded("DUE") == datetime(2026, 8, 1, 9, 0, 0, tzinfo=UTC)
+
+    @patch("caldav.DAVClient")
+    def test_preserves_unmapped_properties(self, mock_dav_client) -> None:
+        """Alarms, subtask links and client properties survive an update."""
+        client, mock_todo = _client_with_todo(mock_dav_client, EXISTING_ICS)
+
+        client.update_todo("Work", VTodo(uid="test-uid-123", summary="New title"))
+
+        cal, todo = _saved_todo(mock_todo)
+        assert str(todo["RELATED-TO"]) == "parent-uid-456"
+        assert todo["RELATED-TO"].params["RELTYPE"] == "PARENT"
+        assert str(todo["X-APPLE-SORT-ORDER"]) == "123456"
+        assert "X-MOZ-SNOOZE-TIME" in todo
+        alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
+        assert len(alarms) == 1
+        assert alarms[0].decoded("TRIGGER") == timedelta(0)
+        assert alarms[0]["TRIGGER"].params["RELATED"] == "END"
+
+    @patch("caldav.DAVClient")
+    def test_keeps_vtimezone(self, mock_dav_client) -> None:
+        """The calendar's VTIMEZONE is kept so TZID references stay valid."""
+        client, mock_todo = _client_with_todo(mock_dav_client, EXISTING_ICS)
+
+        client.update_todo("Work", VTodo(uid="test-uid-123", summary="New title"))
+
+        cal, _ = _saved_todo(mock_todo)
+        assert [str(tz["TZID"]) for tz in cal.walk("VTIMEZONE")] == ["Asia/Tashkent"]
+
+    @patch("caldav.DAVClient")
+    def test_removes_mapped_properties_absent_from_update(
+        self, mock_dav_client
+    ) -> None:
+        """A field cleared in TaskWarrior is removed from the todo."""
+        client, mock_todo = _client_with_todo(mock_dav_client, EXISTING_ICS)
+
+        client.update_todo("Work", VTodo(uid="test-uid-123", summary="New title"))
+
+        _, todo = _saved_todo(mock_todo)
+        for name in ("DUE", "DESCRIPTION", "PRIORITY", "STATUS"):
+            assert name not in todo
+
+    @patch("caldav.DAVClient")
+    def test_bumps_sequence_and_dtstamp(self, mock_dav_client) -> None:
+        """SEQUENCE is incremented and DTSTAMP refreshed."""
+        client, mock_todo = _client_with_todo(mock_dav_client, EXISTING_ICS)
+        before = datetime.now(UTC).replace(microsecond=0)
+
+        client.update_todo("Work", VTodo(uid="test-uid-123", summary="New title"))
+
+        _, todo = _saved_todo(mock_todo)
+        assert todo["SEQUENCE"] == 4
+        assert todo.decoded("DTSTAMP") >= before
+
+    @patch("caldav.DAVClient")
+    def test_completed_sets_percent_complete(self, mock_dav_client) -> None:
+        """Completing a todo sets PERCENT-COMPLETE to 100."""
+        client, mock_todo = _client_with_todo(mock_dav_client, EXISTING_ICS)
+
+        client.update_todo(
+            "Work",
+            VTodo(
+                uid="test-uid-123",
+                summary="Old title",
+                status="COMPLETED",
+                completed=datetime(2026, 7, 25, 6, 16, 20, tzinfo=UTC),
+            ),
+        )
+
+        _, todo = _saved_todo(mock_todo)
+        assert todo["PERCENT-COMPLETE"] == 100
+
+    @patch("caldav.DAVClient")
+    def test_reopened_resets_percent_complete(self, mock_dav_client) -> None:
+        """Reopening a completed todo resets PERCENT-COMPLETE from 100 to 0."""
+        completed_ics = EXISTING_ICS.replace(
+            "STATUS:NEEDS-ACTION", "STATUS:COMPLETED\nCOMPLETED:20260725T061620Z"
+        ).replace("PERCENT-COMPLETE:0", "PERCENT-COMPLETE:100")
+        client, mock_todo = _client_with_todo(mock_dav_client, completed_ics)
+
+        client.update_todo(
+            "Work",
+            VTodo(uid="test-uid-123", summary="Old title", status="NEEDS-ACTION"),
+        )
+
+        _, todo = _saved_todo(mock_todo)
+        assert todo["PERCENT-COMPLETE"] == 0
+        assert "COMPLETED" not in todo
+
+    @patch("caldav.DAVClient")
+    def test_update_not_found(self, mock_dav_client) -> None:
+        """Updating an unknown UID raises CalDAVError."""
+        client, mock_todo = _client_with_todo(mock_dav_client, EXISTING_ICS)
+
+        with pytest.raises(CalDAVError, match="Todo not found"):
+            client.update_todo("Work", VTodo(uid="other-uid", summary="X"))
+        mock_todo.save.assert_not_called()
+
+
+class TestCancelTodoPreservation:
+    """cancel_todo edits in place too."""
+
+    @patch("caldav.DAVClient")
+    def test_cancel_keeps_vtimezone_and_alarm(self, mock_dav_client) -> None:
+        """Cancelling keeps VTIMEZONE, alarms and other properties."""
+        client, mock_todo = _client_with_todo(mock_dav_client, EXISTING_ICS)
+
+        client.cancel_todo("Work", "test-uid-123")
+
+        cal, todo = _saved_todo(mock_todo)
+        assert str(todo["STATUS"]) == "CANCELLED"
+        assert [str(tz["TZID"]) for tz in cal.walk("VTIMEZONE")] == ["Asia/Tashkent"]
+        assert [c.name for c in todo.subcomponents] == ["VALARM"]
+        assert str(todo["RELATED-TO"]) == "parent-uid-456"

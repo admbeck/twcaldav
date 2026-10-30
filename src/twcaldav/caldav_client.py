@@ -2,7 +2,7 @@
 
 import contextlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 import caldav
 from caldav.objects import Calendar as CalDAVCalendar
@@ -10,6 +10,60 @@ from icalendar import Calendar, Todo
 from icalendar.cal import Component as ICalComponent
 
 from twcaldav.logger import get_logger
+
+# Properties twcaldav owns (the ones VTodo.to_icalendar writes). On update these
+# are replaced from TaskWarrior; everything else on the existing todo (alarms,
+# RELATED-TO, client X- properties) is left untouched.
+MAPPED_PROPERTIES = (
+    "UID",
+    "SUMMARY",
+    "STATUS",
+    "DESCRIPTION",
+    "DUE",
+    "DTSTART",
+    "X-TASKWARRIOR-WAIT",
+    "COMPLETED",
+    "PRIORITY",
+    "CATEGORIES",
+    "CREATED",
+    "LAST-MODIFIED",
+)
+
+
+def _apply_update(component: ICalComponent, new: Todo) -> None:
+    """Replace the mapped properties of an existing VTODO in place.
+
+    Args:
+        component: Existing VTODO component from the server.
+        new: VTODO built from TaskWarrior by VTodo.to_icalendar.
+    """
+    for name in MAPPED_PROPERTIES:
+        component.pop(name, None)
+    for name, value in new.items():
+        component[name] = value
+
+    # Keep PERCENT-COMPLETE consistent with the new status
+    if str(component.get("STATUS", "")) == "COMPLETED":
+        component.pop("PERCENT-COMPLETE", None)
+        component.add("PERCENT-COMPLETE", 100)
+    elif int(component.get("PERCENT-COMPLETE", 0)) == 100:
+        component.pop("PERCENT-COMPLETE")
+        component.add("PERCENT-COMPLETE", 0)
+
+    _touch(component)
+
+
+def _touch(component: ICalComponent) -> None:
+    """Mark a VTODO as revised: refresh DTSTAMP, increment SEQUENCE if present.
+
+    Args:
+        component: VTODO component being saved.
+    """
+    component.pop("DTSTAMP", None)
+    component.add("DTSTAMP", datetime.now(UTC))
+    if "SEQUENCE" in component:
+        sequence = int(component.pop("SEQUENCE"))
+        component.add("SEQUENCE", sequence + 1)
 
 
 @dataclass
@@ -375,13 +429,11 @@ class CalDAVClient:
                         component.name == "VTODO"
                         and str(component.get("UID")) == vtodo.uid
                     ):
-                        # Update the todo
-                        new_cal = Calendar()
-                        new_cal.add("PRODID", "-//twcaldav//twcaldav//EN")
-                        new_cal.add("VERSION", "2.0")
-                        new_cal.add_component(vtodo.to_icalendar())
+                        # Update in place, keeping unmapped properties,
+                        # subcomponents (VALARM) and the calendar's VTIMEZONEs
+                        _apply_update(component, vtodo.to_icalendar())
 
-                        todo.data = new_cal.to_ical()
+                        todo.data = cal.to_ical()
                         todo.save()
                         self.logger.info(
                             f"Updated todo {vtodo.uid} in calendar '{calendar_id}'"
@@ -455,14 +507,10 @@ class CalDAVClient:
                         if "STATUS" in component:
                             del component["STATUS"]
                         component.add("STATUS", "CANCELLED")
+                        _touch(component)
 
-                        # Rebuild the calendar with updated component
-                        new_cal = Calendar()
-                        new_cal.add("PRODID", "-//twcaldav//twcaldav//EN")
-                        new_cal.add("VERSION", "2.0")
-                        new_cal.add_component(component)
-
-                        todo.data = new_cal.to_ical()
+                        # Save the original calendar so VTIMEZONEs are kept
+                        todo.data = cal.to_ical()
                         todo.save()
                         self.logger.info(
                             f"Cancelled todo {uid} in calendar '{calendar_id}'"
