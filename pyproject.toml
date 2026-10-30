@@ -26,7 +26,7 @@ classifiers = [
   "Topic :: Office/Business :: Scheduling",
   "Topic :: Utilities",
 ]
-dependencies = ["caldav>=2.1.2,<3"]
+dependencies = ["caldav>=2.1.2,<4"]
 
 [project.urls]
 Homepage = "https://github.com/pcaro90/twcaldav"

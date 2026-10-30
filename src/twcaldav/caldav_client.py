@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import caldav
-from caldav.objects import Calendar as CalDAVCalendar
+from caldav import Calendar as CalDAVCalendar
 from icalendar import Calendar, Todo
 from icalendar.cal import Component as ICalComponent
 
