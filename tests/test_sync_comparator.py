@@ -285,71 +285,80 @@ class TestTasksContentEqualDueDates:
 
 
 class TestTasksContentEqualNotes:
-    """A CalDAV note must not make an otherwise identical task look changed."""
+    """The CalDAV note is compared against the TW note annotation."""
 
-    def test_plain_note_is_ignored(self, comparator) -> None:
-        """TW title equals CalDAV summary; a note on CalDAV is not a difference."""
-        tw_task = Task(
-            uuid="test-uuid",
-            description="Hepatologist appointment",
-            status="pending",
-            entry=datetime(2025, 9, 6, 15, 24, 30),
-        )
-        caldav_todo = VTodo(
-            uid="test-cd-uid",
-            summary="Hepatologist appointment",
-            status="NEEDS-ACTION",
-            description="Ezgu Niat clinic",
-        )
+    ENTRY = datetime(2025, 9, 6, 15, 24, 30)
+    NOTE_TS = "20250906T152429Z"
 
-        assert comparator.tasks_content_equal(tw_task, caldav_todo) is True
-
-    def test_note_plus_matching_annotations_is_equal(self, comparator) -> None:
-        """Note in front of an annotation block that matches TW is equal."""
-        tw_task = Task(
+    def _tw(self, annotations: list[dict] | None = None) -> Task:
+        return Task(
             uuid="test-uuid",
             description="Title",
             status="pending",
-            entry=datetime(2025, 9, 6, 15, 24, 30),
-            annotations=[{"entry": "20241117T103000Z", "description": "First"}],
+            entry=self.ENTRY,
+            annotations=annotations,
         )
-        caldav_todo = VTodo(
+
+    def _cd(self, description: str | None) -> VTodo:
+        return VTodo(
             uid="test-cd-uid",
             summary="Title",
             status="NEEDS-ACTION",
-            description=(
-                "A note\n--- TaskWarrior Annotations ---\n20241117T103000Z|First"
-            ),
+            description=description,
+        )
+
+    def test_same_note_is_equal(self, comparator) -> None:
+        """TW note annotation matching the CalDAV note is equal."""
+        tw_task = self._tw([{"entry": self.NOTE_TS, "description": "A note"}])
+
+        assert comparator.tasks_content_equal(tw_task, self._cd("A note")) is True
+
+    def test_different_note_is_not_equal(self, comparator) -> None:
+        """A changed note is a real difference."""
+        tw_task = self._tw([{"entry": self.NOTE_TS, "description": "A note"}])
+
+        assert comparator.tasks_content_equal(tw_task, self._cd("Other")) is False
+
+    def test_line_endings_and_whitespace_are_ignored(self, comparator) -> None:
+        """CRLF vs LF and surrounding whitespace do not count as a change."""
+        tw_task = self._tw([{"entry": self.NOTE_TS, "description": "a\nb"}])
+
+        assert comparator.tasks_content_equal(tw_task, self._cd(" a\r\nb\n")) is True
+
+    def test_legacy_task_without_note_annotation_differs(self, comparator) -> None:
+        """A task synced before notes were imported needs one update."""
+        assert comparator.tasks_content_equal(self._tw(), self._cd("A note")) is False
+
+    def test_note_plus_matching_annotations_is_equal(self, comparator) -> None:
+        """Note and annotation block both matching TW is equal."""
+        tw_task = self._tw(
+            [
+                {"entry": self.NOTE_TS, "description": "A note"},
+                {"entry": "20241117T103000Z", "description": "First"},
+            ]
+        )
+        caldav_todo = self._cd(
+            "A note\n--- TaskWarrior Annotations ---\n20241117T103000Z|First"
         )
 
         assert comparator.tasks_content_equal(tw_task, caldav_todo) is True
 
     def test_note_plus_different_annotations_is_not_equal(self, comparator) -> None:
         """Differing annotations are still a real difference."""
-        tw_task = Task(
-            uuid="test-uuid",
-            description="Title",
-            status="pending",
-            entry=datetime(2025, 9, 6, 15, 24, 30),
-            annotations=[{"entry": "20241117T103000Z", "description": "First"}],
+        tw_task = self._tw(
+            [
+                {"entry": self.NOTE_TS, "description": "A note"},
+                {"entry": "20241117T103000Z", "description": "First"},
+            ]
         )
-        caldav_todo = VTodo(
-            uid="test-cd-uid",
-            summary="Title",
-            status="NEEDS-ACTION",
-            description=(
-                "A note\n--- TaskWarrior Annotations ---\n20241117T103000Z|Other"
-            ),
+        caldav_todo = self._cd(
+            "A note\n--- TaskWarrior Annotations ---\n20241117T103000Z|Other"
         )
 
         assert comparator.tasks_content_equal(tw_task, caldav_todo) is False
 
     def test_imported_task_with_note_converges(self, comparator) -> None:
-        """Regression: import of a todo with a note must compare equal afterwards.
-
-        Previously the note became the TW description, so the pair never
-        compared equal and was re-imported on every sync.
-        """
+        """Regression: a freshly imported todo with a note compares equal."""
         from twcaldav.field_mapper import caldav_to_taskwarrior
 
         caldav_todo = VTodo(
@@ -357,10 +366,21 @@ class TestTasksContentEqualNotes:
             summary="Hepatologist appointment",
             status="NEEDS-ACTION",
             description="Ezgu Niat clinic",
-            created=datetime(2025, 9, 6, 15, 24, 30),
+            created=self.ENTRY,
             last_modified=datetime(2025, 9, 7, 8, 0, 0),
         )
 
         imported = caldav_to_taskwarrior(caldav_todo)
 
         assert comparator.tasks_content_equal(imported, caldav_todo) is True
+
+    def test_legacy_task_converges_after_one_import(self, comparator) -> None:
+        """After one CalDAV -> TW update the legacy task compares equal."""
+        from twcaldav.field_mapper import caldav_to_taskwarrior
+
+        legacy = self._tw()
+        caldav_todo = self._cd("A note")
+
+        updated = caldav_to_taskwarrior(caldav_todo, existing_task=legacy)
+
+        assert comparator.tasks_content_equal(updated, caldav_todo) is True

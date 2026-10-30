@@ -1,6 +1,6 @@
 """Field mapping between TaskWarrior and CalDAV."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from twcaldav.caldav_client import VTodo
@@ -8,6 +8,12 @@ from twcaldav.taskwarrior import Task
 
 
 ANNOTATION_MARKER = "--- TaskWarrior Annotations ---"
+TW_TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
+
+# The CalDAV note is stored as the annotation dated this long before the task's
+# entry. Real annotations are never older than their task, so they cannot
+# collide with it.
+NOTE_ENTRY_OFFSET = timedelta(seconds=1)
 
 
 def _annotation_fingerprint(annotation: dict) -> str:
@@ -92,8 +98,12 @@ def taskwarrior_to_caldav(task: Task, existing_description: str | None = None) -
         priority_map = {"H": 1, "M": 5, "L": 9}
         priority = priority_map.get(task.priority, 5)
 
-    # Format description: existing CalDAV note (if any) followed by annotations
-    note, _ = _parse_description_for_annotations(existing_description)
+    # Format description: note followed by annotations. The note comes from
+    # the TW note annotation; without one, keep the note already on CalDAV so
+    # tasks synced before notes were imported do not lose it.
+    note, _ = split_note_annotation(task)
+    if not note:
+        note = extract_note(existing_description)
     description = _compose_description(note, _format_description_with_annotations(task))
 
     # Map tags to categories (excluding project - project is managed by mapping config)
@@ -152,27 +162,43 @@ def caldav_to_taskwarrior(vtodo: VTodo, existing_task: Task | None = None) -> Ta
         else:
             priority = "L"
 
+    # Preserve entry timestamp from existing task or use created
+    entry = existing_task.entry if existing_task else (vtodo.created or datetime.now())
+
     # The TaskWarrior description is always the CalDAV summary (the title).
     # The CalDAV DESCRIPTION holds a free-text note plus the annotation block;
-    # only the annotations are imported, the note stays on the CalDAV side.
+    # the note becomes the note annotation, the block becomes annotations.
     description = vtodo.summary
-    _, new_annotations = _parse_description_for_annotations(vtodo.description)
+    note, new_annotations = _parse_description_for_annotations(vtodo.description)
+    note_ts = note_entry(entry)
+
+    # The note annotation is owned by CalDAV: drop it from both sides and
+    # re-add it from the current note, so edits replace and deletions remove it.
+    new_annotations = [
+        ann for ann in new_annotations or [] if _entry_str(ann) != note_ts
+    ]
+    existing_annotations = [
+        ann
+        for ann in (existing_task.annotations if existing_task else None) or []
+        if _entry_str(ann) != note_ts
+    ]
 
     # Merge annotations if existing_task provided (deduplication)
-    if existing_task and existing_task.annotations:
+    if existing_annotations:
         annotations = _merge_annotations(
-            existing_annotations=existing_task.annotations,
-            new_annotations=new_annotations or [],
+            existing_annotations=existing_annotations,
+            new_annotations=new_annotations,
         )
     else:
         annotations = new_annotations
 
+    note = _normalize_note(note)
+    if note:
+        annotations.append({"entry": note_ts, "description": note})
+
     # Map categories to tags (project is not synced via categories)
     # Project is determined by the calendar mapping configuration
     tags = vtodo.categories if vtodo.categories else []
-
-    # Preserve entry timestamp from existing task or use created
-    entry = existing_task.entry if existing_task else (vtodo.created or datetime.now())
 
     return Task(
         uuid=tw_uuid,
@@ -190,6 +216,83 @@ def caldav_to_taskwarrior(vtodo: VTodo, existing_task: Task | None = None) -> Ta
         annotations=annotations if annotations else None,
         caldav_uid=vtodo.uid,
     )
+
+
+def note_entry(entry: datetime) -> str:
+    """Return the annotation timestamp used for the CalDAV note.
+
+    Formatted like Task.to_dict formats entry, so both stay consistent.
+
+    Args:
+        entry: The task's entry timestamp.
+
+    Returns:
+        TaskWarrior timestamp string one NOTE_ENTRY_OFFSET before entry.
+    """
+    return (entry - NOTE_ENTRY_OFFSET).strftime(TW_TIMESTAMP_FORMAT)
+
+
+def _entry_str(annotation: dict) -> str:
+    """Return an annotation's entry as a TaskWarrior timestamp string.
+
+    Args:
+        annotation: Annotation dict with an 'entry' key.
+
+    Returns:
+        Entry formatted as TW_TIMESTAMP_FORMAT, or the raw string value.
+    """
+    entry = annotation.get("entry", "")
+    if isinstance(entry, datetime):
+        return entry.strftime(TW_TIMESTAMP_FORMAT)
+    return str(entry)
+
+
+def _normalize_note(text: str | None) -> str:
+    """Normalize a note for storage and comparison.
+
+    Args:
+        text: Note text (may be None).
+
+    Returns:
+        Text with LF line endings and surrounding whitespace removed.
+    """
+    if not text:
+        return ""
+    return text.replace("\r\n", "\n").strip()
+
+
+def split_note_annotation(task: Task) -> tuple[str, list[dict]]:
+    """Separate the CalDAV note annotation from the task's other annotations.
+
+    Args:
+        task: TaskWarrior Task object.
+
+    Returns:
+        Tuple of (normalized note text or "", remaining annotations).
+    """
+    note_ts = note_entry(task.entry)
+    note = ""
+    others = []
+    for annotation in task.annotations or []:
+        if _entry_str(annotation) == note_ts:
+            note = _normalize_note(annotation.get("description"))
+        else:
+            others.append(annotation)
+    return note, others
+
+
+def extract_note(description: str | None) -> str:
+    """Return the free-text note of a CalDAV DESCRIPTION.
+
+    Args:
+        description: CalDAV DESCRIPTION field.
+
+    Returns:
+        Normalized text before the annotation block, or "" if there is none.
+    """
+    if not description:
+        return ""
+    return _normalize_note(description.split(ANNOTATION_MARKER, 1)[0])
 
 
 def _compose_description(note: str, annotation_block: str | None) -> str | None:
@@ -230,27 +333,30 @@ def _format_description_with_annotations(task: Task) -> str | None:
     Args:
         task: TaskWarrior Task object.
 
+    The note annotation is excluded; it is written as the plain note instead.
+
     Returns:
         Formatted description string, or None if no annotations.
     """
-    if not task.annotations:
+    _, annotations = split_note_annotation(task)
+    if not annotations:
         return None
 
     lines = [ANNOTATION_MARKER]
 
-    for annotation in task.annotations:
+    for annotation in annotations:
         entry = annotation.get("entry", "")
         desc = annotation.get("description", "")
 
         # Ensure entry is in TW format (YYYYMMDDTHHMMSSµZ)
         if isinstance(entry, datetime):
-            entry = entry.strftime("%Y%m%dT%H%M%SZ")
+            entry = entry.strftime(TW_TIMESTAMP_FORMAT)
         # If it's already in TW format, use as-is
         # Otherwise try to parse and convert
         elif isinstance(entry, str) and not ("T" in entry and len(entry) >= 16):
             try:
                 dt = datetime.fromisoformat(entry)
-                entry = dt.strftime("%Y%m%dT%H%M%SZ")
+                entry = dt.strftime(TW_TIMESTAMP_FORMAT)
             except (ValueError, AttributeError):
                 # Skip annotations without valid timestamp
                 continue

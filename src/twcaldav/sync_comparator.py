@@ -127,12 +127,14 @@ class TaskComparator:
         from twcaldav.field_mapper import (
             _format_description_with_annotations,
             extract_annotation_block,
+            extract_note,
+            split_note_annotation,
         )
 
         expected_caldav_description = _format_description_with_annotations(tw_task)
 
-        # Only the annotation block is synced; a free-text note on the CalDAV
-        # side is not part of the TaskWarrior task, so it is not compared.
+        # The annotation block holds every annotation except the note
+        # annotation, which is compared against the CalDAV note below.
         expected_desc = expected_caldav_description or ""
         actual_desc = extract_annotation_block(caldav_todo.description)
 
@@ -140,6 +142,16 @@ class TaskComparator:
             self.logger.debug(
                 f"Content differs: annotations/description - "
                 f"TW has {len(expected_desc)} chars vs CD has {len(actual_desc)} chars"
+            )
+            return False
+
+        # Compare the CalDAV note against the TW note annotation
+        tw_note, _ = split_note_annotation(tw_task)
+        cd_note = extract_note(caldav_todo.description)
+        if tw_note != cd_note:
+            self.logger.debug(
+                f"Content differs: note - "
+                f"TW has {len(tw_note)} chars vs CD has {len(cd_note)} chars"
             )
             return False
 

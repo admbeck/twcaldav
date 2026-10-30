@@ -591,73 +591,185 @@ class TestCalDAVToTaskWarrior:
         # The note is not imported: TW uses the summary as its description
         assert task.description == "Test"
         assert task.annotations is not None
-        assert len(task.annotations) == 1
+        assert len(task.annotations) == 2
+        assert task.annotations[0]["description"] == "Note 1"
+        assert task.annotations[1]["description"] == "Some user description text"
 
 
 class TestCalDAVNotes:
-    """Tests for how a CalDAV note (DESCRIPTION) interacts with the title."""
+    """Tests for mapping a CalDAV note (DESCRIPTION text) to an annotation.
 
-    def test_note_does_not_replace_title(self) -> None:
-        """A plain note must not become the TaskWarrior description."""
+    The note is stored as one TaskWarrior annotation whose entry is one second
+    before the task's own entry, so no real annotation can collide with it.
+    """
+
+    ENTRY = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    NOTE_TS = "20260101T115959Z"
+
+    def _task(self, annotations: list[dict] | None = None) -> Task:
+        return Task(
+            uuid="tw-uuid",
+            description="Hepatologist appointment",
+            status="pending",
+            entry=self.ENTRY,
+            annotations=annotations,
+        )
+
+    def test_note_becomes_annotation_and_title_stays_summary(self) -> None:
+        """A plain note is imported as the note annotation; title is SUMMARY."""
         vtodo = VTodo(
             uid="test-uid",
             summary="Hepatologist appointment",
             description="Ezgu Niat clinic",
-            created=datetime.now(UTC),
+            created=self.ENTRY,
         )
 
         task = caldav_to_taskwarrior(vtodo)
 
         assert task.description == "Hepatologist appointment"
-        assert task.annotations is None
+        assert task.annotations == [
+            {"entry": self.NOTE_TS, "description": "Ezgu Niat clinic"}
+        ]
 
-    def test_taskwarrior_to_caldav_preserves_existing_note(self) -> None:
-        """Updating CalDAV from TW must keep the note already on the server."""
-        task = Task(
-            uuid="tw-uuid",
-            description="Hepatologist appointment",
-            status="pending",
-            entry=datetime.now(UTC),
+    def test_note_entry_uses_existing_task_entry(self) -> None:
+        """When updating, the note timestamp derives from the existing TW entry."""
+        vtodo = VTodo(
+            uid="test-uid",
+            summary="Hepatologist appointment",
+            description="Ezgu Niat clinic",
+            created=datetime(2030, 5, 5, 5, 5, 5, tzinfo=UTC),
         )
 
-        vtodo = taskwarrior_to_caldav(task, existing_description="Ezgu Niat clinic")
+        task = caldav_to_taskwarrior(vtodo, existing_task=self._task())
+
+        assert task.annotations == [
+            {"entry": self.NOTE_TS, "description": "Ezgu Niat clinic"}
+        ]
+
+    def test_multiline_note_is_kept_and_normalized(self) -> None:
+        """CRLF line endings and surrounding whitespace are normalized."""
+        vtodo = VTodo(
+            uid="test-uid",
+            summary="Title",
+            description="  line one\r\nline two\n",
+            created=self.ENTRY,
+        )
+
+        task = caldav_to_taskwarrior(vtodo)
+
+        assert task.annotations == [
+            {"entry": self.NOTE_TS, "description": "line one\nline two"}
+        ]
+
+    def test_edited_note_replaces_annotation(self) -> None:
+        """An edited note replaces the old note annotation, not duplicates it."""
+        existing = self._task(
+            [
+                {"entry": self.NOTE_TS, "description": "old note"},
+                {"entry": "20260102T090000Z", "description": "real annotation"},
+            ]
+        )
+        vtodo = VTodo(
+            uid="test-uid",
+            summary="Hepatologist appointment",
+            description=(
+                "new note\n--- TaskWarrior Annotations ---\n"
+                "20260102T090000Z|real annotation"
+            ),
+        )
+
+        task = caldav_to_taskwarrior(vtodo, existing_task=existing)
+
+        assert task.annotations == [
+            {"entry": "20260102T090000Z", "description": "real annotation"},
+            {"entry": self.NOTE_TS, "description": "new note"},
+        ]
+
+    def test_removed_note_removes_annotation(self) -> None:
+        """Deleting the note in CalDAV removes the note annotation."""
+        existing = self._task(
+            [
+                {"entry": self.NOTE_TS, "description": "old note"},
+                {"entry": "20260102T090000Z", "description": "real annotation"},
+            ]
+        )
+        vtodo = VTodo(
+            uid="test-uid",
+            summary="Hepatologist appointment",
+            description=(
+                "--- TaskWarrior Annotations ---\n20260102T090000Z|real annotation"
+            ),
+        )
+
+        task = caldav_to_taskwarrior(vtodo, existing_task=existing)
+
+        assert task.annotations == [
+            {"entry": "20260102T090000Z", "description": "real annotation"}
+        ]
+
+    def test_taskwarrior_to_caldav_writes_note_annotation_as_plain_note(
+        self,
+    ) -> None:
+        """The note annotation is written as plain text, never into the block."""
+        task = self._task(
+            [
+                {"entry": self.NOTE_TS, "description": "Ezgu Niat clinic"},
+                {"entry": "20260102T090000Z", "description": "real annotation"},
+            ]
+        )
+
+        vtodo = taskwarrior_to_caldav(task)
+
+        assert vtodo.summary == "Hepatologist appointment"
+        assert vtodo.description == (
+            "Ezgu Niat clinic\n--- TaskWarrior Annotations ---\n"
+            "20260102T090000Z|real annotation"
+        )
+
+    def test_taskwarrior_note_wins_over_existing_note(self) -> None:
+        """A note annotation in TW is the source when updating CalDAV."""
+        task = self._task([{"entry": self.NOTE_TS, "description": "from TW"}])
+
+        vtodo = taskwarrior_to_caldav(task, existing_description="on server")
+
+        assert vtodo.description == "from TW"
+
+    def test_taskwarrior_to_caldav_preserves_existing_note(self) -> None:
+        """Without a note annotation in TW, the server note is carried over."""
+        vtodo = taskwarrior_to_caldav(
+            self._task(), existing_description="Ezgu Niat clinic"
+        )
 
         assert vtodo.summary == "Hepatologist appointment"
         assert vtodo.description == "Ezgu Niat clinic"
-
-    def test_taskwarrior_to_caldav_keeps_note_before_annotations(self) -> None:
-        """The note stays in front of the annotation block and round-trips."""
-        task = Task(
-            uuid="tw-uuid",
-            description="Title",
-            status="pending",
-            entry=datetime.now(UTC),
-            annotations=[{"entry": "20241117T103000Z", "description": "First"}],
-        )
-
-        vtodo = taskwarrior_to_caldav(task, existing_description="My note")
-
-        assert vtodo.description == (
-            "My note\n--- TaskWarrior Annotations ---\n20241117T103000Z|First"
-        )
-        back = caldav_to_taskwarrior(vtodo)
-        assert back.description == "Title"
-        assert back.annotations == [
-            {"entry": "20241117T103000Z", "description": "First"}
-        ]
 
     def test_existing_note_with_old_annotations_is_replaced_not_duplicated(
         self,
     ) -> None:
         """Only the note is carried over; the annotation block is rebuilt from TW."""
-        task = Task(
-            uuid="tw-uuid",
-            description="Title",
-            status="pending",
-            entry=datetime.now(UTC),
-        )
         existing = "My note\n--- TaskWarrior Annotations ---\n20241117T103000Z|Stale"
 
-        vtodo = taskwarrior_to_caldav(task, existing_description=existing)
+        vtodo = taskwarrior_to_caldav(self._task(), existing_description=existing)
 
         assert vtodo.description == "My note"
+
+    def test_round_trip_is_a_fixed_point(self) -> None:
+        """CalDAV -> TW -> CalDAV -> TW changes nothing after the first import."""
+        original = VTodo(
+            uid="test-uid",
+            summary="Title",
+            description=(
+                "My note\n--- TaskWarrior Annotations ---\n20260102T090000Z|First"
+            ),
+            created=self.ENTRY,
+        )
+
+        first = caldav_to_taskwarrior(original)
+        written = taskwarrior_to_caldav(
+            first, existing_description=original.description
+        )
+        second = caldav_to_taskwarrior(written, existing_task=first)
+
+        assert written.description == original.description
+        assert second.description == first.description == "Title"
+        assert second.annotations == first.annotations
