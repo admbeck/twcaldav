@@ -119,10 +119,11 @@ class TestTaskWarriorToCalDAV:
 
         vtodo = taskwarrior_to_caldav(task)
 
-        assert vtodo.description is not None
-        assert "--- TaskWarrior Annotations ---" in vtodo.description
-        assert "First note" in vtodo.description
-        assert "Second note" in vtodo.description
+        assert vtodo.description == (
+            "Taskwarrior annotations:\n"
+            "[2024-11-17 10:30:00 UTC] First note\n"
+            "[2024-11-17 11:00:00 UTC] Second note"
+        )
 
     def test_categories_from_tags_only(self) -> None:
         """Test categories include only tags (not project)."""
@@ -722,8 +723,8 @@ class TestCalDAVNotes:
 
         assert vtodo.summary == "Hepatologist appointment"
         assert vtodo.description == (
-            "Ezgu Niat clinic\n--- TaskWarrior Annotations ---\n"
-            "20260102T090000Z|real annotation"
+            "Ezgu Niat clinic\n\nTaskwarrior annotations:\n"
+            "[2026-01-02 09:00:00 UTC] real annotation"
         )
 
     def test_taskwarrior_note_wins_over_existing_note(self) -> None:
@@ -759,7 +760,7 @@ class TestCalDAVNotes:
             uid="test-uid",
             summary="Title",
             description=(
-                "My note\n--- TaskWarrior Annotations ---\n20260102T090000Z|First"
+                "My note\n\nTaskwarrior annotations:\n[2026-01-02 09:00:00 UTC] First"
             ),
             created=self.ENTRY,
         )
@@ -773,3 +774,110 @@ class TestCalDAVNotes:
         assert written.description == original.description
         assert second.description == first.description == "Title"
         assert second.annotations == first.annotations
+
+
+class TestReadableAnnotationFormat:
+    """Tests for the readable annotation block in the CalDAV description."""
+
+    ENTRY = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    def test_multiline_annotation_uses_indented_continuation(self) -> None:
+        """Extra lines of an annotation are indented under its timestamp."""
+        task = Task(
+            uuid="tw-uuid",
+            description="Title",
+            status="pending",
+            entry=self.ENTRY,
+            annotations=[
+                {"entry": "20260102T090000Z", "description": "line one\nline two"},
+            ],
+        )
+
+        vtodo = taskwarrior_to_caldav(task)
+
+        assert vtodo.description == (
+            "Taskwarrior annotations:\n[2026-01-02 09:00:00 UTC] line one\n  line two"
+        )
+
+    def test_parse_readable_block(self) -> None:
+        """The readable block parses back to TW timestamps and text."""
+        vtodo = VTodo(
+            uid="test-uid",
+            summary="Title",
+            description=(
+                "A note\r\n\r\nTaskwarrior annotations:\r\n"
+                "[2026-01-02 09:00:00 UTC] line one\r\n"
+                "  line two\r\n"
+                "\r\n"
+                "  line four\r\n"
+                "[2026-01-03 10:15:30 UTC] second | with pipe\r\n"
+            ),
+            created=self.ENTRY,
+        )
+
+        task = caldav_to_taskwarrior(vtodo)
+
+        assert task.annotations == [
+            {
+                "entry": "20260102T090000Z",
+                "description": "line one\nline two\n\nline four",
+            },
+            {"entry": "20260103T101530Z", "description": "second | with pipe"},
+            {"entry": "20260101T115959Z", "description": "A note"},
+        ]
+
+    def test_continuation_survives_stripped_indentation(self) -> None:
+        """A client that drops the indent still yields the same annotation."""
+        vtodo = VTodo(
+            uid="test-uid",
+            summary="Title",
+            description=(
+                "Taskwarrior annotations:\n[2026-01-02 09:00:00 UTC] line one\nline two"
+            ),
+            created=self.ENTRY,
+        )
+
+        task = caldav_to_taskwarrior(vtodo)
+
+        assert task.annotations == [
+            {"entry": "20260102T090000Z", "description": "line one\nline two"},
+        ]
+
+    def test_header_inside_a_sentence_is_part_of_the_note(self) -> None:
+        """Only a header on its own line starts the annotation block."""
+        vtodo = VTodo(
+            uid="test-uid",
+            summary="Title",
+            description="Remember: Taskwarrior annotations: are synced",
+            created=self.ENTRY,
+        )
+
+        task = caldav_to_taskwarrior(vtodo)
+
+        assert task.annotations == [
+            {
+                "entry": "20260101T115959Z",
+                "description": "Remember: Taskwarrior annotations: are synced",
+            },
+        ]
+
+    def test_legacy_block_is_rewritten_in_readable_format(self) -> None:
+        """Old pipe format is read, and written back in the readable format."""
+        legacy = VTodo(
+            uid="test-uid",
+            summary="Title",
+            description=(
+                "--- TaskWarrior Annotations ---\n20260102T090000Z|added in taskwarrior"
+            ),
+            created=self.ENTRY,
+        )
+
+        task = caldav_to_taskwarrior(legacy)
+        written = taskwarrior_to_caldav(task, existing_description=legacy.description)
+
+        assert task.annotations == [
+            {"entry": "20260102T090000Z", "description": "added in taskwarrior"},
+        ]
+        assert written.description == (
+            "Taskwarrior annotations:\n[2026-01-02 09:00:00 UTC] added in taskwarrior"
+        )

@@ -123,30 +123,37 @@ class TaskComparator:
             )
             return False
 
-        # Compare annotations (stored in CalDAV description)
+        # Compare annotations (stored in CalDAV description) by timestamp and
+        # text, so the block format (readable or legacy) does not matter. The
+        # note annotation is compared against the CalDAV note below.
         from twcaldav.field_mapper import (
-            _format_description_with_annotations,
-            extract_annotation_block,
+            _entry_str,
+            _normalize_note,
             extract_note,
+            parse_annotations,
             split_note_annotation,
         )
 
-        expected_caldav_description = _format_description_with_annotations(tw_task)
+        tw_note, tw_annotations = split_note_annotation(tw_task)
+        expected_annotations = sorted(
+            (_entry_str(ann), _normalize_note(ann.get("description")))
+            for ann in tw_annotations
+            if ann.get("description")
+        )
+        actual_annotations = sorted(
+            (_entry_str(ann), _normalize_note(ann.get("description")))
+            for ann in parse_annotations(caldav_todo.description)
+        )
 
-        # The annotation block holds every annotation except the note
-        # annotation, which is compared against the CalDAV note below.
-        expected_desc = expected_caldav_description or ""
-        actual_desc = extract_annotation_block(caldav_todo.description)
-
-        if expected_desc != actual_desc:
+        if expected_annotations != actual_annotations:
             self.logger.debug(
-                f"Content differs: annotations/description - "
-                f"TW has {len(expected_desc)} chars vs CD has {len(actual_desc)} chars"
+                f"Content differs: annotations - "
+                f"TW has {len(expected_annotations)} vs "
+                f"CD has {len(actual_annotations)}"
             )
             return False
 
         # Compare the CalDAV note against the TW note annotation
-        tw_note, _ = split_note_annotation(tw_task)
         cd_note = extract_note(caldav_todo.description)
         if tw_note != cd_note:
             self.logger.debug(

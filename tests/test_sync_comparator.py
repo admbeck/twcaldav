@@ -384,3 +384,59 @@ class TestTasksContentEqualNotes:
         updated = caldav_to_taskwarrior(caldav_todo, existing_task=legacy)
 
         assert comparator.tasks_content_equal(updated, caldav_todo) is True
+
+
+class TestTasksContentEqualAnnotationFormats:
+    """Annotations are compared by timestamp and text, not by block format."""
+
+    ENTRY = datetime(2025, 9, 6, 15, 24, 30)
+
+    def _tw(self) -> Task:
+        return Task(
+            uuid="test-uuid",
+            description="Title",
+            status="pending",
+            entry=self.ENTRY,
+            annotations=[
+                {"entry": "20241117T103000Z", "description": "First\nsecond line"},
+            ],
+        )
+
+    def _cd(self, description: str) -> VTodo:
+        return VTodo(
+            uid="test-cd-uid",
+            summary="Title",
+            status="NEEDS-ACTION",
+            description=description,
+        )
+
+    def test_readable_block_is_equal(self, comparator) -> None:
+        """The readable format matching TW annotations is equal."""
+        caldav_todo = self._cd(
+            "Taskwarrior annotations:\n[2024-11-17 10:30:00 UTC] First\n  second line"
+        )
+
+        assert comparator.tasks_content_equal(self._tw(), caldav_todo) is True
+
+    def test_readable_block_with_other_text_is_not_equal(self, comparator) -> None:
+        """Different annotation text is a real difference."""
+        caldav_todo = self._cd(
+            "Taskwarrior annotations:\n[2024-11-17 10:30:00 UTC] Something else"
+        )
+
+        assert comparator.tasks_content_equal(self._tw(), caldav_todo) is False
+
+    def test_legacy_block_is_equal(self, comparator) -> None:
+        """A todo still in the old pipe format does not count as changed."""
+        tw_task = Task(
+            uuid="test-uuid",
+            description="Title",
+            status="pending",
+            entry=self.ENTRY,
+            annotations=[{"entry": "20241117T103000Z", "description": "First"}],
+        )
+        caldav_todo = self._cd(
+            "--- TaskWarrior Annotations ---\n20241117T103000Z|First"
+        )
+
+        assert comparator.tasks_content_equal(tw_task, caldav_todo) is True

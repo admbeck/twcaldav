@@ -1,5 +1,6 @@
 """Field mapping between TaskWarrior and CalDAV."""
 
+import re
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -7,8 +8,22 @@ from twcaldav.caldav_client import VTodo
 from twcaldav.taskwarrior import Task
 
 
-ANNOTATION_MARKER = "--- TaskWarrior Annotations ---"
+ANNOTATION_HEADER = "Taskwarrior annotations:"
+# Header of the pipe-delimited format written by twcaldav <= 1.2.0; still read.
+LEGACY_ANNOTATION_MARKER = "--- TaskWarrior Annotations ---"
 TW_TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
+DISPLAY_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S UTC"
+CONTINUATION_INDENT = "  "
+
+# A header only counts on a line of its own
+_BLOCK_HEADER_RE = re.compile(
+    rf"^[ \t]*({re.escape(ANNOTATION_HEADER)}|{re.escape(LEGACY_ANNOTATION_MARKER)})"
+    r"[ \t]*$",
+    re.MULTILINE,
+)
+_ANNOTATION_LINE_RE = re.compile(
+    r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC\] ?(.*)$"
+)
 
 # The CalDAV note is stored as the annotation dated this long before the task's
 # entry. Real annotations are never older than their task, so they cannot
@@ -290,9 +305,41 @@ def extract_note(description: str | None) -> str:
     Returns:
         Normalized text before the annotation block, or "" if there is none.
     """
+    note, _, _ = _split_description(description)
+    return note
+
+
+def parse_annotations(description: str | None) -> list[dict]:
+    """Return the annotations stored in a CalDAV DESCRIPTION.
+
+    Args:
+        description: CalDAV DESCRIPTION field.
+
+    Returns:
+        Annotation dicts with TW-format 'entry' and 'description' keys.
+    """
+    _, annotations = _parse_description_for_annotations(description)
+    return annotations or []
+
+
+def _split_description(description: str | None) -> tuple[str, str, bool]:
+    """Split a CalDAV DESCRIPTION into note and annotation block.
+
+    Args:
+        description: CalDAV DESCRIPTION field.
+
+    Returns:
+        Tuple of (normalized note, block text after the header, whether the
+        block uses the legacy pipe format). The block is "" if there is none.
+    """
     if not description:
-        return ""
-    return _normalize_note(description.split(ANNOTATION_MARKER, 1)[0])
+        return "", "", False
+    text = description.replace("\r\n", "\n")
+    match = _BLOCK_HEADER_RE.search(text)
+    if not match:
+        return _normalize_note(text), "", False
+    legacy = match.group(1) == LEGACY_ANNOTATION_MARKER
+    return _normalize_note(text[: match.start()]), text[match.end() :], legacy
 
 
 def _compose_description(note: str, annotation_block: str | None) -> str | None:
@@ -306,34 +353,22 @@ def _compose_description(note: str, annotation_block: str | None) -> str | None:
         Combined string, or None if both parts are empty.
     """
     parts = [part for part in (note.strip(), annotation_block) if part]
-    return "\n".join(parts) if parts else None
-
-
-def extract_annotation_block(description: str | None) -> str:
-    """Return only the annotation block of a CalDAV DESCRIPTION.
-
-    Args:
-        description: CalDAV DESCRIPTION field.
-
-    Returns:
-        The marker and everything after it, stripped; empty string if the
-        description has no annotation block.
-    """
-    if not description or ANNOTATION_MARKER not in description:
-        return ""
-    return (ANNOTATION_MARKER + description.split(ANNOTATION_MARKER, 1)[1]).strip()
+    return "\n\n".join(parts) if parts else None
 
 
 def _format_description_with_annotations(task: Task) -> str | None:
     """Format task annotations for CalDAV description field.
 
-    Uses pipe-delimited format: TIMESTAMP|DESCRIPTION
-    Where TIMESTAMP is TaskWarrior format (YYYYMMDDTHHMMSSµZ).
+    Writes a readable block, one annotation per line:
+
+        Taskwarrior annotations:
+        [2026-01-02 09:00:00 UTC] text
+          continuation line of a multi-line annotation
+
+    The note annotation is excluded; it is written as the plain note instead.
 
     Args:
         task: TaskWarrior Task object.
-
-    The note annotation is excluded; it is written as the plain note instead.
 
     Returns:
         Formatted description string, or None if no annotations.
@@ -342,27 +377,29 @@ def _format_description_with_annotations(task: Task) -> str | None:
     if not annotations:
         return None
 
-    lines = [ANNOTATION_MARKER]
+    lines = [ANNOTATION_HEADER]
 
     for annotation in annotations:
         entry = annotation.get("entry", "")
         desc = annotation.get("description", "")
 
-        # Ensure entry is in TW format (YYYYMMDDTHHMMSSµZ)
-        if isinstance(entry, datetime):
-            entry = entry.strftime(TW_TIMESTAMP_FORMAT)
-        # If it's already in TW format, use as-is
-        # Otherwise try to parse and convert
-        elif isinstance(entry, str) and not ("T" in entry and len(entry) >= 16):
-            try:
-                dt = datetime.fromisoformat(entry)
-                entry = dt.strftime(TW_TIMESTAMP_FORMAT)
-            except (ValueError, AttributeError):
-                # Skip annotations without valid timestamp
-                continue
+        try:
+            if isinstance(entry, datetime):
+                timestamp = entry
+            elif isinstance(entry, str) and "T" in entry and len(entry) >= 16:
+                timestamp = datetime.strptime(entry[:15] + "Z", TW_TIMESTAMP_FORMAT)
+            else:
+                timestamp = datetime.fromisoformat(entry)
+        except (ValueError, TypeError):
+            # Skip annotations without valid timestamp
+            continue
 
-        if entry and desc:
-            lines.append(f"{entry}|{desc}")
+        if not desc:
+            continue
+
+        first, *rest = desc.replace("\r\n", "\n").split("\n")
+        lines.append(f"[{timestamp.strftime(DISPLAY_TIMESTAMP_FORMAT)}] {first}")
+        lines.extend(f"{CONTINUATION_INDENT}{line}" if line else "" for line in rest)
 
     # If only the header, return None
     if len(lines) == 1:
@@ -376,8 +413,8 @@ def _parse_description_for_annotations(
 ) -> tuple[str, list[dict] | None]:
     """Parse CalDAV description to extract annotations.
 
-    Parses pipe-delimited format: TIMESTAMP|DESCRIPTION
-    Where TIMESTAMP is TaskWarrior format (YYYYMMDDTHHMMSSµZ).
+    Reads the readable format written by _format_description_with_annotations
+    and the legacy pipe-delimited format (TIMESTAMP|DESCRIPTION).
 
     Args:
         description: CalDAV description field.
@@ -387,48 +424,92 @@ def _parse_description_for_annotations(
         User description is empty string if only annotations exist.
         Annotations list is None if no annotations found.
     """
+    note, block, legacy = _split_description(description)
+    if not block.strip():
+        return note, None
+
+    if legacy:
+        annotations = _parse_legacy_block(block)
+    else:
+        annotations = _parse_readable_block(block)
+
+    return note, annotations if annotations else None
+
+
+def _parse_readable_block(block: str) -> list[dict]:
+    """Parse the readable annotation block.
+
+    Any line that is not a timestamp line continues the previous annotation,
+    so the block survives clients that strip the indentation.
+
+    Args:
+        block: Text after the annotation header.
+
+    Returns:
+        Annotation dicts with TW-format 'entry' and 'description' keys.
+    """
     from twcaldav.logger import get_logger
 
     logger = get_logger()
 
-    if not description:
-        return "", None
+    annotations: list[dict] = []
+    for line in block.split("\n"):
+        match = _ANNOTATION_LINE_RE.match(line.strip())
+        if match:
+            timestamp = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+            annotations.append(
+                {
+                    "entry": timestamp.strftime(TW_TIMESTAMP_FORMAT),
+                    "description": match.group(2),
+                }
+            )
+        elif annotations:
+            if line.startswith(CONTINUATION_INDENT):
+                line = line[len(CONTINUATION_INDENT) :]
+            annotations[-1]["description"] += "\n" + line
+        elif line.strip():
+            logger.warning(f"Skipping malformed annotation line: {line}")
 
-    # Check for annotation marker
-    marker = ANNOTATION_MARKER
-    if marker not in description:
-        # No annotations, return as-is
-        return description, None
+    for annotation in annotations:
+        annotation["description"] = annotation["description"].rstrip()
+    return annotations
 
-    # Split on marker
-    parts = description.split(marker)
-    user_desc = parts[0].strip()
 
-    # Parse annotations
+def _parse_legacy_block(block: str) -> list[dict]:
+    """Parse the legacy pipe-delimited annotation block (TIMESTAMP|DESCRIPTION).
+
+    Args:
+        block: Text after the legacy marker.
+
+    Returns:
+        Annotation dicts with TW-format 'entry' and 'description' keys.
+    """
+    from twcaldav.logger import get_logger
+
+    logger = get_logger()
+
     annotations = []
-    if len(parts) > 1:
-        annotation_text = parts[1].strip()
-        for line in annotation_text.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
+    for line in block.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
 
-            # Parse format: TIMESTAMP|DESCRIPTION
-            if "|" in line:
-                # Split on first pipe only (description may contain pipes)
-                timestamp, desc = line.split("|", 1)
-                timestamp = timestamp.strip()
-                desc = desc.strip()
+        # Parse format: TIMESTAMP|DESCRIPTION
+        if "|" in line:
+            # Split on first pipe only (description may contain pipes)
+            timestamp, desc = line.split("|", 1)
+            timestamp = timestamp.strip()
+            desc = desc.strip()
 
-                # Validate timestamp format
-                if "T" in timestamp and 15 <= len(timestamp) <= 17:
-                    annotations.append({"entry": timestamp, "description": desc})
-                else:
-                    logger.warning(
-                        f"Skipping annotation with invalid timestamp: {timestamp}"
-                    )
+            # Validate timestamp format
+            if "T" in timestamp and 15 <= len(timestamp) <= 17:
+                annotations.append({"entry": timestamp, "description": desc})
             else:
-                # Malformed line (no pipe delimiter)
-                logger.warning(f"Skipping malformed annotation line: {line}")
+                logger.warning(
+                    f"Skipping annotation with invalid timestamp: {timestamp}"
+                )
+        else:
+            # Malformed line (no pipe delimiter)
+            logger.warning(f"Skipping malformed annotation line: {line}")
 
-    return user_desc, annotations if annotations else None
+    return annotations
