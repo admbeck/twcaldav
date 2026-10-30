@@ -270,6 +270,22 @@ class TestCalDAVToTaskWarrior:
         assert task.tags == ["work", "urgent"]
         assert task.priority == "H"
 
+    def test_update_keeps_unmapped_task_fields(self) -> None:
+        """Fields CalDAV doesn't carry, like depends, survive an update."""
+        existing = Task(
+            uuid="tw-uuid",
+            description="Task",
+            status="pending",
+            entry=datetime(2024, 11, 17, 10, 0, 0, tzinfo=UTC),
+            extra={"start": "20241117T103000Z", "depends": ["other-uuid"]},
+        )
+        vtodo = VTodo(uid="caldav-uid-123", summary="Renamed")
+
+        task = caldav_to_taskwarrior(vtodo, existing_task=existing)
+
+        assert task.extra == {"start": "20241117T103000Z", "depends": ["other-uuid"]}
+        assert task.extra is not existing.extra
+
     def test_status_mapping(self) -> None:
         """Test status mapping."""
         vtodo = VTodo(uid="test-uid", summary="Test", created=datetime.now(UTC))

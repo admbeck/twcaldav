@@ -230,6 +230,7 @@ def caldav_to_taskwarrior(vtodo: VTodo, existing_task: Task | None = None) -> Ta
         tags=tags if tags else None,
         annotations=annotations if annotations else None,
         caldav_uid=vtodo.uid,
+        extra=dict(existing_task.extra) if existing_task else {},
     )
 
 

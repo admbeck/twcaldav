@@ -104,6 +104,57 @@ class TestTask:
         assert data["tags"] == ["important", "urgent"]
         assert len(data["annotations"]) == 1
 
+    def test_from_dict_keeps_unmapped_fields(self) -> None:
+        """Fields twcaldav doesn't model are kept in extra."""
+        data = {
+            "uuid": "12345678-1234-1234-1234-123456789012",
+            "description": "Task",
+            "status": "pending",
+            "entry": "20241117T100000Z",
+            "start": "20241117T103000Z",
+            "depends": ["87654321-4321-4321-4321-210987654321"],
+            "estimate": "2h",
+        }
+
+        task = Task.from_dict(data)
+
+        assert task.extra == {
+            "start": "20241117T103000Z",
+            "depends": ["87654321-4321-4321-4321-210987654321"],
+            "estimate": "2h",
+        }
+
+    def test_from_dict_drops_computed_fields(self) -> None:
+        """The id and urgency columns of an export are not kept."""
+        data = {
+            "id": 3,
+            "uuid": "12345678-1234-1234-1234-123456789012",
+            "description": "Task",
+            "status": "pending",
+            "entry": "20241117T100000Z",
+            "urgency": 4.2,
+        }
+
+        task = Task.from_dict(data)
+
+        assert task.extra == {}
+
+    def test_to_dict_writes_unmapped_fields(self) -> None:
+        """A from_dict/to_dict round trip keeps fields twcaldav doesn't model."""
+        data = {
+            "uuid": "12345678-1234-1234-1234-123456789012",
+            "description": "Task",
+            "status": "pending",
+            "entry": "20241117T100000Z",
+            "start": "20241117T103000Z",
+            "depends": ["87654321-4321-4321-4321-210987654321"],
+        }
+
+        result = Task.from_dict(data).to_dict()
+
+        assert result["start"] == "20241117T103000Z"
+        assert result["depends"] == ["87654321-4321-4321-4321-210987654321"]
+
 
 class TestTaskWarrior:
     """Tests for TaskWarrior class."""

@@ -2,12 +2,35 @@
 
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from twcaldav.logger import get_logger
+
+# Export fields Task models itself.
+_MAPPED_FIELDS = frozenset(
+    {
+        "uuid",
+        "description",
+        "status",
+        "entry",
+        "modified",
+        "project",
+        "due",
+        "scheduled",
+        "wait",
+        "end",
+        "priority",
+        "tags",
+        "annotations",
+        "caldav_uid",
+    }
+)
+
+# Export fields TaskWarrior computes; they can't be imported.
+_COMPUTED_FIELDS = frozenset({"id", "urgency"})
 
 
 @dataclass
@@ -28,6 +51,9 @@ class Task:
     tags: list[str] | None = None
     annotations: list[dict[str, Any]] | None = None
     caldav_uid: str | None = None
+    # Fields twcaldav doesn't model (start, depends, recur, other UDAs...).
+    # TaskWarrior import replaces the whole task, so they are written back.
+    extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Task":
@@ -72,6 +98,11 @@ class Task:
             tags=data.get("tags"),
             annotations=data.get("annotations"),
             caldav_uid=data.get("caldav_uid"),
+            extra={
+                key: value
+                for key, value in data.items()
+                if key not in _MAPPED_FIELDS and key not in _COMPUTED_FIELDS
+            },
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -81,6 +112,7 @@ class Task:
             Dictionary suitable for TaskWarrior import.
         """
         data: dict[str, Any] = {
+            **self.extra,
             "uuid": self.uuid,
             "description": self.description,
             "status": self.status,
