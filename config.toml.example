@@ -21,6 +21,12 @@ password = "your-password"
 #          Tasks deleted/cancelled in CalDAV will NOT be deleted from TaskWarrior
 delete_tasks = false
 
+# Timezone of dates without a time (optional, defaults to the system timezone)
+# A CalDAV date like DUE;VALUE=DATE:20251020 is midnight in this timezone, and
+# TaskWarrior times at midnight here are written back as dates. Set it to the
+# same value on every machine that syncs the same tasks.
+# timezone = "Europe/Berlin"
+
 # Project-Calendar mappings
 # Each mapping links a TaskWarrior project to a CalDAV calendar
 # Tasks in unmapped projects will NOT be synced

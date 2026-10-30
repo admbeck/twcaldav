@@ -1,6 +1,7 @@
 """Tests for configuration module."""
 
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -152,6 +153,39 @@ def test_config_sync_defaults() -> None:
 
     config = Config.from_dict(data)
     assert config.sync.delete_tasks is False
+
+
+def _config_data(**sync: object) -> dict:
+    """Return minimal config data with these [sync] settings."""
+    return {
+        "caldav": {
+            "url": "https://caldav.example.com",
+            "username": "testuser",
+            "password": "testpass",
+        },
+        "mappings": [{"taskwarrior_project": "work", "caldav_calendar": "Work"}],
+        "sync": sync,
+    }
+
+
+def test_config_sync_timezone() -> None:
+    """A timezone name in [sync] is parsed."""
+    config = Config.from_dict(_config_data(timezone="Europe/Berlin"))
+
+    assert config.sync.timezone == ZoneInfo("Europe/Berlin")
+
+
+def test_config_sync_timezone_default() -> None:
+    """Without a timezone, the system timezone is used later."""
+    config = Config.from_dict(_config_data())
+
+    assert config.sync.timezone is None
+
+
+def test_config_sync_timezone_invalid() -> None:
+    """An unknown timezone name is rejected."""
+    with pytest.raises(ValueError, match="timezone"):
+        Config.from_dict(_config_data(timezone="Nowhere/Nothing"))
 
 
 def test_get_calendar_for_project() -> None:

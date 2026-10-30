@@ -58,8 +58,15 @@ mirrored on [GitHub](https://github.com/admbeck/twcaldav).
   (`DUE;TZID=Asia/Tashkent:...T123000`) to TaskWarrior as that wall time in UTC,
   hours off, and compared times by dropping the timezone, so the shift was never
   noticed. Times are now converted to UTC. Tasks synced by older versions are
-  corrected from CalDAV on the next sync. Date-only and floating times still
-  count as UTC.
+  corrected from CalDAV on the next sync. Floating times still count as UTC.
+- **Dates without a time (v1.4.4).** Upstream read `DUE;VALUE=DATE:20251020`
+  as midnight UTC and wrote it back as a timed `DUE:20251020T000000Z`, so
+  CalDAV clients showed a time. A date is now midnight local time, the same as
+  `task add due:2025-10-20`, and due or scheduled times at local midnight are
+  written back as dates. Tasks synced by older versions are corrected from
+  CalDAV on the next sync. The timezone is the system's, or `timezone` in
+  `[sync]`; set it to the same value on every machine syncing the same tasks,
+  or they'll disagree about which instant a date is.
 - **CI.** Codecov is removed, and the tests can also be started by hand with
   `gh workflow run test.yml`.
 
@@ -68,8 +75,8 @@ mirrored on [GitHub](https://github.com/admbeck/twcaldav).
 - **Upstream too:** If the same field changes differently on both sides between
   syncs, the side modified last wins. Upstream does this for the whole task, not
   just the field.
-- **Upstream too:** A date-only DUE becomes a date-time (midnight UTC) once
-  TaskWarrior writes the task back.
+- **Fork only:** A task deliberately due at exactly 00:00 local time is
+  written to CalDAV as all-day, since TaskWarrior can't tell the two apart.
 - **Upstream too:** RELATED-TO isn't mapped to TaskWarrior `depends`. This fork
   at least keeps it; upstream deletes it on every update from TaskWarrior.
 

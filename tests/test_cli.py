@@ -141,7 +141,10 @@ caldav_calendar = "Work Tasks"
     mock_config_cls.from_file.assert_called_once()
     mock_tw_cls.assert_called_once()
     mock_caldav_cls.assert_called_once_with(
-        url="https://example.com/caldav", username="user", password="pass"
+        url="https://example.com/caldav",
+        username="user",
+        password="pass",
+        timezone=mock_config.sync.timezone,
     )
     mock_sync_cls.assert_called_once_with(
         config=mock_config,
@@ -666,6 +669,7 @@ caldav_calendar = "Work Tasks"
         url="https://example.com/caldav",
         username="user",
         password="pass",
+        timezone=mock_config.sync.timezone,
     )
     mock_caldav.list_calendars.assert_called_once()
 

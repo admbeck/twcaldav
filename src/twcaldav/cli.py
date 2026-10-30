@@ -226,6 +226,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
             url=config.caldav.url,
             username=config.caldav.username,
             password=config.caldav.password,
+            timezone=config.sync.timezone,
         )
     except Exception as e:
         logger.error(f"Failed to initialize clients: {e}")
@@ -396,6 +397,7 @@ def cmd_test_caldav(args: argparse.Namespace) -> int:
             url=config.caldav.url,
             username=config.caldav.username,
             password=config.caldav.password,
+            timezone=config.sync.timezone,
         )
 
         logger.info("Successfully connected to CalDAV server")

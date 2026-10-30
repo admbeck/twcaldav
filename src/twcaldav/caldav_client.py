@@ -2,13 +2,14 @@
 
 import contextlib
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 
 import caldav
 from caldav import Calendar as CalDAVCalendar
 from icalendar import Calendar, Todo
 from icalendar.cal import Component as ICalComponent
 
+from twcaldav.dates import date_to_datetime, ical_dates, local_timezone
 from twcaldav.logger import get_logger
 
 # Properties twcaldav owns (the ones VTodo.to_icalendar writes). On update these
@@ -84,11 +85,12 @@ class VTodo:
     last_modified: datetime | None = None
 
     @classmethod
-    def from_icalendar(cls, todo: ICalComponent) -> "VTodo":
+    def from_icalendar(cls, todo: ICalComponent, tz: tzinfo = UTC) -> "VTodo":
         """Create VTodo from icalendar Todo component.
 
         Args:
             todo: icalendar Todo component.
+            tz: Timezone of DUE and DTSTART dates without a time.
 
         Returns:
             VTodo instance.
@@ -101,29 +103,18 @@ class VTodo:
         description = str(todo.get("DESCRIPTION")) if todo.get("DESCRIPTION") else None
 
         # Parse datetime fields
+        # A date without a time is midnight local time, as in TaskWarrior
         due = todo.get("DUE")
         if due and hasattr(due, "dt"):
             due = due.dt
-            # Convert to datetime if it's a date
-            if isinstance(due, datetime):
-                pass  # Already a datetime
-            else:
-                # It's a date, convert to datetime
-                from datetime import time
-
-                due = datetime.combine(due, time())
+            if not isinstance(due, datetime):
+                due = date_to_datetime(due, tz)
 
         dtstart = todo.get("DTSTART")
         if dtstart and hasattr(dtstart, "dt"):
             dtstart = dtstart.dt
-            # Convert to datetime if it's a date
-            if isinstance(dtstart, datetime):
-                pass  # Already a datetime
-            else:
-                # It's a date, convert to datetime
-                from datetime import time
-
-                dtstart = datetime.combine(dtstart, time())
+            if not isinstance(dtstart, datetime):
+                dtstart = date_to_datetime(dtstart, tz)
 
         created = todo.get("CREATED")
         if created and hasattr(created, "dt"):
@@ -218,8 +209,11 @@ class VTodo:
             last_modified=last_modified,
         )
 
-    def to_icalendar(self) -> Todo:
+    def to_icalendar(self, tz: tzinfo = UTC) -> Todo:
         """Convert VTodo to icalendar Todo component.
+
+        Args:
+            tz: Timezone in which DUE and DTSTART at midnight become dates.
 
         Returns:
             icalendar Todo component.
@@ -232,10 +226,11 @@ class VTodo:
             todo.add("STATUS", self.status)
         if self.description:
             todo.add("DESCRIPTION", self.description)
-        if self.due:
-            todo.add("DUE", self.due)
-        if self.dtstart:
-            todo.add("DTSTART", self.dtstart)
+        due, dtstart = ical_dates(self.due, self.dtstart, tz)
+        if due:
+            todo.add("DUE", due)
+        if dtstart:
+            todo.add("DTSTART", dtstart)
         if self.wait:
             todo.add("X-TASKWARRIOR-WAIT", self.wait)
         if self.completed:
@@ -259,19 +254,28 @@ class CalDAVError(Exception):
 class CalDAVClient:
     """Interface to CalDAV server."""
 
-    def __init__(self, url: str, username: str, password: str) -> None:
+    def __init__(
+        self,
+        url: str,
+        username: str,
+        password: str,
+        timezone: tzinfo | None = None,
+    ) -> None:
         """Initialize CalDAV client.
 
         Args:
             url: CalDAV server URL.
             username: Username for authentication.
             password: Password for authentication.
+            timezone: Timezone of dates without a time; the system timezone
+                if None.
 
         Raises:
             CalDAVError: If connection fails.
         """
         self.url = url
         self.username = username
+        self.timezone = timezone or local_timezone()
         self.logger = get_logger()
 
         try:
@@ -359,7 +363,7 @@ class CalDAVClient:
                     cal = Calendar.from_ical(todo.data)
                     for component in cal.walk():
                         if component.name == "VTODO":
-                            vtodo = VTodo.from_icalendar(component)
+                            vtodo = VTodo.from_icalendar(component, self.timezone)
                             vtodos.append(vtodo)
                 except Exception as e:
                     self.logger.warning(f"Failed to parse todo: {e}")
@@ -393,7 +397,7 @@ class CalDAVClient:
             cal = Calendar()
             cal.add("PRODID", "-//twcaldav//twcaldav//EN")
             cal.add("VERSION", "2.0")
-            cal.add_component(vtodo.to_icalendar())
+            cal.add_component(vtodo.to_icalendar(self.timezone))
 
             ical_data = cal.to_ical()
 
@@ -431,7 +435,7 @@ class CalDAVClient:
                     ):
                         # Update in place, keeping unmapped properties,
                         # subcomponents (VALARM) and the calendar's VTIMEZONEs
-                        _apply_update(component, vtodo.to_icalendar())
+                        _apply_update(component, vtodo.to_icalendar(self.timezone))
 
                         todo.data = cal.to_ical()
                         todo.save()

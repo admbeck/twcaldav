@@ -17,6 +17,9 @@ CALDAV_PASSWORD = os.getenv("CALDAV_PASSWORD", "test-pass")
 CALDAV_CALENDAR_ID = os.getenv("CALDAV_CALENDAR_ID", "test-calendar")
 TW_PROJECT = os.getenv("TW_PROJECT", "test")
 TASKDATA = os.getenv("TASKDATA", None)
+# Local timezone for TaskWarrior and twcaldav, so dates without a time are
+# tested away from UTC
+TIMEZONE = "Europe/Berlin"
 
 
 # TaskWarrior operations
@@ -36,6 +39,7 @@ def run_task_command(
     """
     cmd = ["task"]
     env = os.environ.copy()
+    env["TZ"] = TIMEZONE
     taskdata_path = taskdata or TASKDATA
 
     if taskdata_path:
@@ -470,6 +474,7 @@ caldav_calendar = "{CALDAV_CALENDAR_ID}"
 
 [sync]
 delete_tasks = {str(delete_tasks).lower()}
+timezone = "{TIMEZONE}"
 """
     config_path.write_text(config_content)
 
@@ -478,6 +483,7 @@ delete_tasks = {str(delete_tasks).lower()}
         args.append("--dry-run")
 
     env = os.environ.copy()
+    env["TZ"] = TIMEZONE
     taskdata_path = taskdata or TASKDATA
     if taskdata_path:
         env["TASKDATA"] = taskdata_path

@@ -1,6 +1,6 @@
 """Tests for the sync engine module."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
@@ -13,6 +13,7 @@ from twcaldav.config import (
     ProjectCalendarMapping,
     SyncConfig,
 )
+from twcaldav.dates import date_to_datetime
 from twcaldav.field_mapper import note_entry, taskwarrior_to_caldav
 from twcaldav.sync_engine import (
     SyncAction,
@@ -1030,6 +1031,22 @@ class TestTimezoneMigration:
         assert pair.direction == SyncDirection.CALDAV_TO_TW
         assert not pair.write_caldav
         assert pair.merged.to_dict()["due"] == "20250815T073001Z"
+        fixed = Task.from_dict(pair.merged.to_dict())
+        assert sync_engine.classifier.classify(fixed, todo).action == SyncAction.SKIP
+
+    def test_utc_midnight_date_is_corrected_from_caldav(self, sync_engine) -> None:
+        """A date-only due stored as midnight UTC becomes local midnight in TW."""
+        task, todo = _synced_pair()
+        todo.due = date_to_datetime(date(2025, 10, 20), ZoneInfo("Europe/Berlin"))
+        # What older versions stored, and recorded as the base
+        task.due = datetime(2025, 10, 20, 0, 0, 0, tzinfo=UTC)
+        task.caldav_base = encode_base(snapshot_from_task(task))
+
+        pair = sync_engine.classifier.classify(task, todo)
+
+        assert pair.direction == SyncDirection.CALDAV_TO_TW
+        assert not pair.write_caldav
+        assert pair.merged.to_dict()["due"] == "20251019T220000Z"
         fixed = Task.from_dict(pair.merged.to_dict())
         assert sync_engine.classifier.classify(fixed, todo).action == SyncAction.SKIP
 

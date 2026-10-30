@@ -4,6 +4,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 @dataclass
@@ -28,6 +29,8 @@ class SyncConfig:
     """Synchronization behavior configuration."""
 
     delete_tasks: bool = False
+    # Timezone of dates without a time; None means the system timezone
+    timezone: ZoneInfo | None = None
 
 
 @dataclass
@@ -119,7 +122,15 @@ class Config:
 
         # Parse sync config (optional)
         sync_data = data.get("sync", {})
-        sync = SyncConfig(delete_tasks=sync_data.get("delete_tasks", False))
+        timezone = None
+        if timezone_name := sync_data.get("timezone"):
+            try:
+                timezone = ZoneInfo(timezone_name)
+            except (ZoneInfoNotFoundError, ValueError) as e:
+                raise ValueError(f"Unknown timezone in [sync]: {timezone_name}") from e
+        sync = SyncConfig(
+            delete_tasks=sync_data.get("delete_tasks", False), timezone=timezone
+        )
 
         return cls(caldav=caldav, mappings=mappings, sync=sync)
 

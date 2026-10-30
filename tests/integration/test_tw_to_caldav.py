@@ -713,3 +713,42 @@ def test_tw_to_caldav_delete_disabled(clean_test_environment) -> None:
     assert todo is not None
     status = get_todo_property(todo, "status")
     assert status == "CANCELLED", f"Expected CANCELLED status, got {status}"
+
+
+@pytest.mark.integration
+def test_tw_to_caldav_date_due_is_date_only(clean_test_environment) -> None:
+    """A TaskWarrior due date without a time syncs as VALUE=DATE."""
+    description = "TaskWarrior task due on a date"
+    task = create_task(description, due="2030-08-15")
+    assert task is not None
+    assert run_sync()
+
+    _, principal = get_caldav_client()
+    assert principal is not None
+    calendar = get_calendar(principal)
+    assert calendar is not None
+    todo = find_todo_by_summary(calendar, description)
+    assert todo is not None
+    assert "DUE;VALUE=DATE:20300815" in todo.data
+
+
+@pytest.mark.integration
+def test_tw_to_caldav_update_keeps_date_only(clean_test_environment) -> None:
+    """Changing another field in TaskWarrior keeps the due date-only."""
+    description = "TaskWarrior date task changed later"
+    task = create_task(description, due="2030-08-15")
+    assert task is not None
+    assert run_sync()
+
+    time.sleep(2)
+    assert modify_task(task["uuid"], priority="H")
+    assert run_sync()
+
+    _, principal = get_caldav_client()
+    assert principal is not None
+    calendar = get_calendar(principal)
+    assert calendar is not None
+    todo = find_todo_by_summary(calendar, description)
+    assert todo is not None
+    assert "DUE;VALUE=DATE:20300815" in todo.data
+    assert get_todo_property(todo, "PRIORITY") == 1

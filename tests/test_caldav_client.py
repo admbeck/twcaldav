@@ -1,12 +1,15 @@
 """Tests for CalDAV client module."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 from icalendar import Calendar, Todo
 
 from twcaldav.caldav_client import CalDAVClient, CalDAVError, VTodo
+
+BERLIN = ZoneInfo("Europe/Berlin")
 
 
 class TestVTodo:
@@ -84,6 +87,56 @@ class TestVTodo:
         assert str(todo.get("DESCRIPTION")) == "Task description"
         assert todo.get("PRIORITY") == 5
         # X-TASKWARRIOR-UUID no longer included (using UDA instead)
+
+
+class TestVTodoDateOnly:
+    """Tests for DUE and DTSTART without a time."""
+
+    def test_from_icalendar_date_is_local_midnight(self) -> None:
+        """A date-only DUE and DTSTART are midnight in the given timezone."""
+        todo = Todo()
+        todo.add("UID", "test-uid-123")
+        todo.add("SUMMARY", "Pay rent")
+        todo.add("DUE", date(2025, 8, 15))
+        todo.add("DTSTART", date(2025, 8, 10))
+
+        vtodo = VTodo.from_icalendar(todo, BERLIN)
+
+        assert vtodo.due == datetime(2025, 8, 14, 22, 0, tzinfo=UTC)
+        assert vtodo.dtstart == datetime(2025, 8, 9, 22, 0, tzinfo=UTC)
+
+    def test_from_icalendar_date_defaults_to_utc(self) -> None:
+        """Without a timezone, a date is midnight UTC."""
+        todo = Todo()
+        todo.add("UID", "test-uid-123")
+        todo.add("SUMMARY", "Pay rent")
+        todo.add("DUE", date(2025, 8, 15))
+
+        vtodo = VTodo.from_icalendar(todo)
+
+        assert vtodo.due == datetime(2025, 8, 15, 0, 0, tzinfo=UTC)
+
+    def test_to_icalendar_local_midnight_is_date(self) -> None:
+        """A due at local midnight is written as VALUE=DATE."""
+        vtodo = VTodo(
+            uid="test-uid-123",
+            summary="Pay rent",
+            due=datetime(2025, 8, 14, 22, 0, tzinfo=UTC),
+        )
+
+        todo = vtodo.to_icalendar(BERLIN)
+
+        assert todo.decoded("DUE") == date(2025, 8, 15)
+        assert b"DUE;VALUE=DATE:20250815" in todo.to_ical()
+
+    def test_to_icalendar_timed_due_stays_datetime(self) -> None:
+        """A due at 09:00 local is written as a datetime."""
+        due = datetime(2025, 8, 15, 7, 0, tzinfo=UTC)
+        vtodo = VTodo(uid="test-uid-123", summary="Pay rent", due=due)
+
+        todo = vtodo.to_icalendar(BERLIN)
+
+        assert todo.decoded("DUE") == due
 
 
 class TestCalDAVClient:
@@ -464,6 +517,24 @@ class TestUpdateTodo:
         assert str(todo["DESCRIPTION"]) == "New note"
         assert todo["PRIORITY"] == 1
         assert todo.decoded("DUE") == datetime(2026, 8, 1, 9, 0, 0, tzinfo=UTC)
+
+    @patch("caldav.DAVClient")
+    def test_writes_local_midnight_as_date(self, mock_dav_client) -> None:
+        """The client's timezone decides which dues are written as dates."""
+        client, mock_todo = _client_with_todo(mock_dav_client, EXISTING_ICS)
+        client.timezone = BERLIN
+
+        client.update_todo(
+            "Work",
+            VTodo(
+                uid="test-uid-123",
+                summary="New title",
+                due=datetime(2026, 7, 31, 22, 0, 0, tzinfo=UTC),
+            ),
+        )
+
+        _, todo = _saved_todo(mock_todo)
+        assert todo.decoded("DUE") == date(2026, 8, 1)
 
     @patch("caldav.DAVClient")
     def test_preserves_unmapped_properties(self, mock_dav_client) -> None:
