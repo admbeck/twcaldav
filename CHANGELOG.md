@@ -1,3 +1,14 @@
+## v1.3.0 (2026-10-30)
+
+### Feat
+
+- write annotations in a readable format
+- import CalDAV notes as a TaskWarrior annotation
+
+### Fix
+
+- use CalDAV summary as the title and keep notes out of the comparison
+
 ## v1.2.0 (2025-12-02)
 
 ### Feat
