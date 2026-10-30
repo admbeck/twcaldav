@@ -1,3 +1,9 @@
+## v1.3.1 (2026-10-30)
+
+### Fix
+
+- update todos in place instead of rebuilding them
+
 ## v1.3.0 (2026-10-30)
 
 ### Feat
