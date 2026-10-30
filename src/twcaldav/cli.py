@@ -347,7 +347,7 @@ def cmd_unlink(args: argparse.Namespace) -> int:
             for task in tasks:
                 task_id = task.uuid
                 logger.debug(f"Removing caldav_uid from task {task_id}")
-                tw.modify_task(task_id, {"caldav_uid": ""})
+                tw.modify_task(task_id, {"caldav_uid": "", "caldav_base": ""})
             logger.info(f"Successfully unlinked {len(tasks)} task(s)")
         else:
             logger.info(f"Would unlink {len(tasks)} task(s)")

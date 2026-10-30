@@ -1,11 +1,15 @@
 """Synchronization engine for TaskWarrior and CalDAV."""
 
+from collections.abc import Callable
+from dataclasses import replace
+
 from twcaldav.caldav_client import CalDAVClient, VTodo
 from twcaldav.config import Config
 from twcaldav.field_mapper import caldav_to_taskwarrior, taskwarrior_to_caldav
 from twcaldav.logger import get_logger
 from twcaldav.sync_classifier import SyncClassifier
 from twcaldav.sync_comparator import TaskComparator
+from twcaldav.sync_merge import encode_base, snapshot_from_task, snapshot_from_todo
 from twcaldav.sync_types import SyncAction, SyncDirection, SyncStats, TaskPair
 from twcaldav.taskwarrior import Task, TaskWarrior
 
@@ -181,7 +185,11 @@ class SyncEngine:
         create_count = sum(1 for p in task_pairs if p.action == SyncAction.CREATE)
         update_count = sum(1 for p in task_pairs if p.action == SyncAction.UPDATE)
         delete_count = sum(1 for p in task_pairs if p.action == SyncAction.DELETE)
+        both_count = sum(1 for p in task_pairs if p.direction == SyncDirection.BOTH)
         skip_count = sum(1 for p in task_pairs if p.action == SyncAction.SKIP)
+        base_count = sum(
+            1 for p in task_pairs if p.action == SyncAction.SKIP and p.merged
+        )
 
         # Count skip reasons for more detail
         skip_reasons: dict[str, int] = {}
@@ -195,11 +203,14 @@ class SyncEngine:
         if create_count > 0:
             plan_parts.append(f"{create_count} create")
         if update_count > 0:
-            plan_parts.append(f"{update_count} update")
+            both = f" ({both_count} both)" if both_count else ""
+            plan_parts.append(f"{update_count} update{both}")
         if delete_count > 0:
             plan_parts.append(f"{delete_count} delete")
         if skip_count > 0:
             plan_parts.append(f"{skip_count} skip")
+        if base_count > 0:
+            plan_parts.append(f"{base_count} base recorded")
 
         if plan_parts:
             self.logger.info(f"Sync plan: {', '.join(plan_parts)}")
@@ -222,16 +233,37 @@ class SyncEngine:
                 f"CD:{pair.caldav_todo.uid if pair.caldav_todo else 'None'}"
             )
             self.stats.skipped += 1
+            if pair.merged is not None:
+                self._run_guarded(pair, lambda: self._record_base(pair.merged))
             return
 
-        try:
-            if pair.action == SyncAction.CREATE:
-                self._execute_create(pair)
-            elif pair.action == SyncAction.UPDATE:
-                self._execute_update(pair)
-            elif pair.action == SyncAction.DELETE:
-                self._execute_delete(pair)
+        self._run_guarded(pair, lambda: self._dispatch(pair))
 
+    def _dispatch(self, pair: TaskPair) -> None:
+        """Run the handler for a pair's action.
+
+        Args:
+            pair: Task pair with a CREATE, UPDATE or DELETE action.
+        """
+        if pair.action == SyncAction.CREATE:
+            self._execute_create(pair)
+        elif pair.action == SyncAction.UPDATE:
+            if pair.merged is not None:
+                self._execute_merge(pair)
+            else:
+                self._execute_update(pair)
+        elif pair.action == SyncAction.DELETE:
+            self._execute_delete(pair)
+
+    def _run_guarded(self, pair: TaskPair, action: Callable[[], None]) -> None:
+        """Run a sync step, logging and counting any error.
+
+        Args:
+            pair: Task pair being synced.
+            action: The step to run.
+        """
+        try:
+            action()
         except Exception as e:
             self.logger.error(
                 f"Error executing {pair.action.value} for "
@@ -239,6 +271,56 @@ class SyncEngine:
                 f"CD:{pair.caldav_todo.uid if pair.caldav_todo else 'None'}: {e}"
             )
             self.stats.errors += 1
+
+    def _record_base(self, task: Task) -> None:
+        """Write a task whose only change is its caldav_base.
+
+        Args:
+            task: Task carrying the new base.
+        """
+        self.logger.debug(f"Recording sync base for task {task.uuid}")
+        if not self.dry_run:
+            self.tw.import_tasks([task])
+        self.stats.bases_recorded += 1
+
+    def _execute_merge(self, pair: TaskPair) -> None:
+        """Write a three-way merge to the sides that need it.
+
+        CalDAV is written first, so a failed CalDAV write leaves the old base
+        in place and the next sync merges again.
+
+        Args:
+            pair: UPDATE pair from the merge, with merged set.
+        """
+        assert pair.merged is not None and pair.caldav_todo is not None
+        merged = pair.merged
+        self.logger.info(f"Syncing '{merged.description}': {pair.reason}")
+
+        if pair.write_caldav:
+            calendar_name = self.config.get_calendar_for_project(merged.project or "")
+            if not calendar_name:
+                self.logger.warning(
+                    f"No calendar mapping for project: {merged.project}"
+                )
+                self.stats.skipped += 1
+                return
+            if not self.dry_run:
+                vtodo = taskwarrior_to_caldav(
+                    merged,
+                    existing_description=pair.caldav_todo.description,
+                    keep_existing_note=False,
+                )
+                vtodo.uid = pair.caldav_todo.uid
+                self.caldav.update_todo(calendar_name, vtodo)
+            self.stats.caldav_updated += 1
+
+        # The TaskWarrior side always gets the new base
+        if not self.dry_run:
+            self.tw.import_tasks([merged])
+        if pair.write_tw:
+            self.stats.tw_updated += 1
+        else:
+            self.stats.bases_recorded += 1
 
     def _execute_create(self, pair: TaskPair) -> None:
         """Execute create action.
@@ -269,8 +351,17 @@ class SyncEngine:
 
                 self.caldav.create_todo(calendar_name, vtodo)
 
-                # Update TaskWarrior task with CalDAV UID
-                self.tw.modify_task(pair.tw_task.uuid, {"caldav_uid": vtodo.uid})
+                # Link the TaskWarrior task to the todo and record the base
+                self.tw.import_tasks(
+                    [
+                        replace(
+                            pair.tw_task,
+                            extra=dict(pair.tw_task.extra),
+                            caldav_uid=vtodo.uid,
+                            caldav_base=encode_base(snapshot_from_task(pair.tw_task)),
+                        )
+                    ]
+                )
                 self.logger.debug(
                     f"Set caldav_uid UDA to {vtodo.uid} on task {pair.tw_task.uuid}"
                 )
@@ -294,6 +385,7 @@ class SyncEngine:
                     if project:
                         task.project = project
 
+                task.caldav_base = encode_base(snapshot_from_todo(pair.caldav_todo))
                 self.tw.create_task(task)
 
             self.stats.tw_created += 1
@@ -337,6 +429,18 @@ class SyncEngine:
 
                 self.caldav.update_todo(calendar_name, vtodo)
 
+                # TaskWarrior was the source, so it is the base. A note carried
+                # over from CalDAV then counts as a CalDAV addition next time.
+                self.tw.import_tasks(
+                    [
+                        replace(
+                            pair.tw_task,
+                            extra=dict(pair.tw_task.extra),
+                            caldav_base=encode_base(snapshot_from_task(pair.tw_task)),
+                        )
+                    ]
+                )
+
             self.stats.caldav_updated += 1
 
         elif pair.direction == SyncDirection.CALDAV_TO_TW:
@@ -363,6 +467,10 @@ class SyncEngine:
                 # Ensure caldav_uid is set
                 if not task.caldav_uid:
                     task.caldav_uid = pair.caldav_todo.uid
+
+                # CalDAV was the source, so it is the base. Annotations kept
+                # from TaskWarrior then count as TaskWarrior additions.
+                task.caldav_base = encode_base(snapshot_from_todo(pair.caldav_todo))
 
                 # Use import_tasks to update - this properly handles all fields
                 # including annotations, unlike modify_task

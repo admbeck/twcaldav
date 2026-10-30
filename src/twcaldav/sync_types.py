@@ -21,6 +21,7 @@ class SyncDirection(Enum):
 
     TW_TO_CALDAV = "tw_to_caldav"
     CALDAV_TO_TW = "caldav_to_tw"
+    BOTH = "both"
 
 
 @dataclass
@@ -32,6 +33,11 @@ class TaskPair:
     action: SyncAction
     direction: SyncDirection | None
     reason: str
+    # Set by the three-way merge: the TaskWarrior task to write, carrying the
+    # new base. On a SKIP it means only the base needs recording.
+    merged: Task | None = None
+    write_tw: bool = False
+    write_caldav: bool = False
 
 
 @dataclass
@@ -45,6 +51,7 @@ class SyncStats:
     caldav_updated: int = 0
     caldav_deleted: int = 0
     skipped: int = 0
+    bases_recorded: int = 0
     errors: int = 0
 
     def __str__(self) -> str:
@@ -60,6 +67,7 @@ class SyncStats:
                 f"{self.caldav_updated} updated, {self.caldav_deleted} deleted"
             ),
             f"  Skipped: {self.skipped}",
+            f"  Bases recorded: {self.bases_recorded}",
             f"  Errors: {self.errors}",
         ]
         return "\n".join(lines)

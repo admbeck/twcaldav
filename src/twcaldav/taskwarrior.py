@@ -26,6 +26,7 @@ _MAPPED_FIELDS = frozenset(
         "tags",
         "annotations",
         "caldav_uid",
+        "caldav_base",
     }
 )
 
@@ -51,6 +52,8 @@ class Task:
     tags: list[str] | None = None
     annotations: list[dict[str, Any]] | None = None
     caldav_uid: str | None = None
+    # Last state agreed with CalDAV, for the three-way merge (see sync_merge).
+    caldav_base: str | None = None
     # Fields twcaldav doesn't model (start, depends, recur, other UDAs...).
     # TaskWarrior import replaces the whole task, so they are written back.
     extra: dict[str, Any] = field(default_factory=dict)
@@ -98,6 +101,7 @@ class Task:
             tags=data.get("tags"),
             annotations=data.get("annotations"),
             caldav_uid=data.get("caldav_uid"),
+            caldav_base=data.get("caldav_base"),
             extra={
                 key: value
                 for key, value in data.items()
@@ -139,6 +143,8 @@ class Task:
             data["annotations"] = self.annotations
         if self.caldav_uid:
             data["caldav_uid"] = self.caldav_uid
+        if self.caldav_base:
+            data["caldav_base"] = self.caldav_base
 
         return data
 

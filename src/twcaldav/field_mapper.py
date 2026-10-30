@@ -78,7 +78,11 @@ def _merge_annotations(
     return merged
 
 
-def taskwarrior_to_caldav(task: Task, existing_description: str | None = None) -> VTodo:
+def taskwarrior_to_caldav(
+    task: Task,
+    existing_description: str | None = None,
+    keep_existing_note: bool = True,
+) -> VTodo:
     """Convert TaskWarrior task to CalDAV VTodo.
 
     Args:
@@ -86,6 +90,9 @@ def taskwarrior_to_caldav(task: Task, existing_description: str | None = None) -
         existing_description: DESCRIPTION of the CalDAV todo being updated
             (optional). Any free-text note in it is carried over so an update
             from TaskWarrior does not wipe notes written in a CalDAV client.
+        keep_existing_note: Whether to carry over the existing note when the
+            task has no note annotation. The three-way merge passes False,
+            since it knows the note was deleted on purpose.
 
     Returns:
         CalDAV VTodo object.
@@ -117,7 +124,7 @@ def taskwarrior_to_caldav(task: Task, existing_description: str | None = None) -
     # the TW note annotation; without one, keep the note already on CalDAV so
     # tasks synced before notes were imported do not lose it.
     note, _ = split_note_annotation(task)
-    if not note:
+    if not note and keep_existing_note:
         note = extract_note(existing_description)
     description = _compose_description(note, _format_description_with_annotations(task))
 
@@ -165,17 +172,7 @@ def caldav_to_taskwarrior(vtodo: VTodo, existing_task: Task | None = None) -> Ta
     }
     status = status_map.get(vtodo.status or "NEEDS-ACTION", "pending")
 
-    # Map priority
-    # CalDAV: 1-9 (1=highest, 5=medium, 9=lowest)
-    # TaskWarrior: H, M, L
-    priority = None
-    if vtodo.priority is not None:
-        if vtodo.priority <= 3:
-            priority = "H"
-        elif vtodo.priority <= 6:
-            priority = "M"
-        else:
-            priority = "L"
+    priority = caldav_priority_to_tw(vtodo.priority)
 
     # Preserve entry timestamp from existing task or use created
     entry = existing_task.entry if existing_task else (vtodo.created or datetime.now())
@@ -232,6 +229,25 @@ def caldav_to_taskwarrior(vtodo: VTodo, existing_task: Task | None = None) -> Ta
         caldav_uid=vtodo.uid,
         extra=dict(existing_task.extra) if existing_task else {},
     )
+
+
+def caldav_priority_to_tw(priority: int | None) -> str | None:
+    """Map a CalDAV PRIORITY to a TaskWarrior priority.
+
+    Args:
+        priority: CalDAV priority, 1 (highest) to 9 (lowest); 0 or None is
+            undefined.
+
+    Returns:
+        "H" for 1-3, "M" for 4-6, "L" for 7-9, or None.
+    """
+    if not priority:
+        return None
+    if priority <= 3:
+        return "H"
+    if priority <= 6:
+        return "M"
+    return "L"
 
 
 def note_entry(entry: datetime) -> str:

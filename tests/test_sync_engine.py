@@ -1,6 +1,6 @@
 """Tests for the sync engine module."""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock, patch
 
 import pytest
@@ -12,12 +12,19 @@ from twcaldav.config import (
     ProjectCalendarMapping,
     SyncConfig,
 )
+from twcaldav.field_mapper import note_entry, taskwarrior_to_caldav
 from twcaldav.sync_engine import (
     SyncAction,
     SyncDirection,
     SyncEngine,
     SyncStats,
     TaskPair,
+)
+from twcaldav.sync_merge import (
+    decode_base,
+    encode_base,
+    snapshot_from_task,
+    snapshot_from_todo,
 )
 from twcaldav.taskwarrior import Task, TaskWarrior
 
@@ -720,3 +727,284 @@ class TestSyncEngine:
             sync_engine.sync()
 
         assert sync_engine.stats.errors == 1
+
+
+def _synced_pair(**fields: object) -> tuple[Task, VTodo]:
+    """Return a task and its todo as left by a sync, with a recorded base."""
+    entry = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
+    task = Task(
+        uuid="tw-123",
+        description="Pay rent",
+        status="pending",
+        entry=entry,
+        modified=datetime(2026, 1, 2, 9, 0, 0, tzinfo=UTC),
+        project="work",
+        due=datetime(2026, 2, 1, 12, 0, 0, tzinfo=UTC),
+        annotations=[{"entry": note_entry(entry), "description": "Account 123"}],
+        caldav_uid="cd-123",
+    )
+    for name, value in fields.items():
+        setattr(task, name, value)
+    todo = taskwarrior_to_caldav(task)
+    todo.last_modified = datetime(2026, 1, 2, 9, 0, 0, tzinfo=UTC)
+    task.caldav_base = encode_base(snapshot_from_task(task))
+    return task, todo
+
+
+class TestThreeWayMerge:
+    """Tests for classifying and syncing with a recorded base."""
+
+    def test_no_base_and_equal_records_base(self, sync_engine) -> None:
+        """A synced pair without a base is skipped and its base recorded."""
+        task, todo = _synced_pair()
+        task.caldav_base = None
+
+        pair = sync_engine.classifier.classify(task, todo)
+
+        assert pair.action == SyncAction.SKIP
+        assert pair.merged is not None
+        assert decode_base(pair.merged.caldav_base) == snapshot_from_task(task)
+
+    def test_with_base_and_unchanged_skips(self, sync_engine) -> None:
+        """Nothing changed since the last sync: plain skip."""
+        task, todo = _synced_pair()
+
+        pair = sync_engine.classifier.classify(task, todo)
+
+        assert pair.action == SyncAction.SKIP
+        assert pair.merged is None
+
+    def test_taskwarrior_change_updates_caldav(self, sync_engine) -> None:
+        """A field changed in TaskWarrior is written to CalDAV."""
+        task, todo = _synced_pair()
+        task.priority = "H"
+
+        pair = sync_engine.classifier.classify(task, todo)
+
+        assert pair.action == SyncAction.UPDATE
+        assert pair.direction == SyncDirection.TW_TO_CALDAV
+        assert pair.write_caldav and not pair.write_tw
+
+    def test_caldav_change_wins_over_newer_taskwarrior(self, sync_engine) -> None:
+        """A CalDAV-only change wins even if TaskWarrior was touched later."""
+        task, todo = _synced_pair()
+        task.modified = datetime(2026, 1, 5, 9, 0, 0, tzinfo=UTC)
+        todo.due = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+
+        pair = sync_engine.classifier.classify(task, todo)
+
+        assert pair.direction == SyncDirection.CALDAV_TO_TW
+        assert pair.merged.due == datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+
+    def test_changes_on_both_sides_are_both_kept(self, sync_engine) -> None:
+        """TaskWarrior's priority and CalDAV's due date both survive."""
+        task, todo = _synced_pair()
+        task.priority = "H"
+        todo.due = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+
+        pair = sync_engine.classifier.classify(task, todo)
+
+        assert pair.direction == SyncDirection.BOTH
+        assert pair.write_caldav and pair.write_tw
+        assert pair.merged.priority == "H"
+        assert pair.merged.due == datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+
+    def test_conflict_logs_a_warning(self, sync_engine, caplog) -> None:
+        """The same field changed on both sides is logged."""
+        task, todo = _synced_pair()
+        task.description = "TW title"
+        todo.summary = "CD title"
+        todo.last_modified = datetime(2026, 1, 5, 9, 0, 0, tzinfo=UTC)
+
+        with caplog.at_level("WARNING", logger="twcaldav"):
+            pair = sync_engine.classifier.classify(task, todo)
+
+        assert pair.merged.description == "CD title"
+        assert "title" in caplog.text
+
+    def test_same_change_on_both_sides_records_base(self, sync_engine) -> None:
+        """Both sides already agree on a new value: only the base is stale."""
+        task, todo = _synced_pair()
+        task.description = todo.summary = "Pay rent now"
+
+        pair = sync_engine.classifier.classify(task, todo)
+
+        assert pair.action == SyncAction.SKIP
+        assert decode_base(pair.merged.caldav_base)["title"] == "Pay rent now"
+
+    def test_completed_without_timestamp_is_not_rewritten(self, sync_engine) -> None:
+        """TaskWarrior's own end time doesn't make a base without one stale."""
+        task, todo = _synced_pair()
+        todo.status = "COMPLETED"
+        task.caldav_base = encode_base(snapshot_from_todo(todo))
+        task.status = "completed"
+        task.end = datetime(2026, 1, 3, 9, 0, 0, tzinfo=UTC)
+
+        pair = sync_engine.classifier.classify(task, todo)
+
+        assert pair.action == SyncAction.SKIP
+        assert pair.merged is None
+
+    def test_denotated_note_is_removed_from_caldav(
+        self, sync_engine, mock_caldav, mock_tw
+    ) -> None:
+        """Removing the note annotation in TaskWarrior deletes the CalDAV note."""
+        task, todo = _synced_pair()
+        task.annotations = None
+
+        pair = sync_engine.classifier.classify(task, todo)
+        sync_engine._execute_sync_action(pair)
+
+        written = mock_caldav.update_todo.call_args.args[1]
+        assert not written.description
+        assert written.uid == "cd-123"
+
+    def test_both_writes_each_side_once(
+        self, sync_engine, mock_caldav, mock_tw
+    ) -> None:
+        """A merge with changes on both sides writes each side once."""
+        task, todo = _synced_pair()
+        task.priority = "H"
+        todo.due = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+
+        pair = sync_engine.classifier.classify(task, todo)
+        sync_engine._execute_sync_action(pair)
+
+        mock_caldav.update_todo.assert_called_once()
+        assert mock_caldav.update_todo.call_args.args[0] == "Work Tasks"
+        mock_tw.import_tasks.assert_called_once()
+        imported = mock_tw.import_tasks.call_args.args[0][0]
+        assert decode_base(imported.caldav_base) == snapshot_from_task(imported)
+        assert sync_engine.stats.caldav_updated == 1
+        assert sync_engine.stats.tw_updated == 1
+
+    def test_caldav_only_write_still_records_base(
+        self, sync_engine, mock_caldav, mock_tw
+    ) -> None:
+        """Updating only CalDAV stores the new base without counting a TW update."""
+        task, todo = _synced_pair()
+        task.priority = "H"
+
+        pair = sync_engine.classifier.classify(task, todo)
+        sync_engine._execute_sync_action(pair)
+
+        imported = mock_tw.import_tasks.call_args.args[0][0]
+        assert decode_base(imported.caldav_base)["priority"] == "H"
+        assert sync_engine.stats.tw_updated == 0
+        assert sync_engine.stats.bases_recorded == 1
+
+    def test_record_base_on_skip(self, sync_engine, mock_tw) -> None:
+        """A skip that carries a merged task writes only the base."""
+        task, todo = _synced_pair()
+        task.caldav_base = None
+
+        pair = sync_engine.classifier.classify(task, todo)
+        sync_engine._execute_sync_action(pair)
+
+        mock_tw.import_tasks.assert_called_once()
+        assert sync_engine.stats.skipped == 1
+        assert sync_engine.stats.bases_recorded == 1
+
+    def test_dry_run_writes_nothing(self, sample_config, mock_tw, mock_caldav) -> None:
+        """Merges and base records are only logged in dry-run mode."""
+        engine = SyncEngine(sample_config, mock_tw, mock_caldav, dry_run=True)
+        task, todo = _synced_pair()
+        task.priority = "H"
+        todo.due = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+
+        engine._execute_sync_action(engine.classifier.classify(task, todo))
+
+        mock_caldav.update_todo.assert_not_called()
+        mock_tw.import_tasks.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            lambda task, todo: setattr(task, "priority", "H"),
+            lambda task, todo: setattr(todo, "summary", "Renamed"),
+            lambda task, todo: setattr(task, "annotations", None),
+            lambda task, todo: setattr(todo, "description", "New note"),
+            lambda task, todo: (
+                setattr(task, "tags", ["a"]),
+                setattr(todo, "due", datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)),
+            ),
+            lambda task, todo: (
+                setattr(todo, "status", "COMPLETED"),
+                setattr(todo, "completed", datetime(2026, 1, 3, 9, 0, 0, tzinfo=UTC)),
+            ),
+        ],
+    )
+    def test_merge_reaches_a_fixed_point(self, sync_engine, change) -> None:
+        """After the merge is written to both sides, the next sync skips."""
+        task, todo = _synced_pair()
+        change(task, todo)
+
+        pair = sync_engine.classifier.classify(task, todo)
+        new_task = pair.merged
+        new_todo = todo
+        if pair.write_caldav:
+            new_todo = taskwarrior_to_caldav(
+                new_task,
+                existing_description=todo.description,
+                keep_existing_note=False,
+            )
+
+        again = sync_engine.classifier.classify(new_task, new_todo)
+
+        assert again.action == SyncAction.SKIP
+        assert again.merged is None
+
+    @patch("twcaldav.sync_engine.taskwarrior_to_caldav")
+    def test_no_base_lww_to_caldav_records_base(
+        self, mock_convert, sync_engine, mock_caldav, mock_tw
+    ) -> None:
+        """An old-style update from TaskWarrior records TaskWarrior as the base."""
+        task, todo = _synced_pair(description="New title")
+        task.caldav_base = None
+        mock_convert.return_value = VTodo(uid="x", summary="New title")
+        pair = TaskPair(task, todo, SyncAction.UPDATE, SyncDirection.TW_TO_CALDAV, "")
+
+        sync_engine._execute_update(pair)
+
+        imported = mock_tw.import_tasks.call_args.args[0][0]
+        assert decode_base(imported.caldav_base) == snapshot_from_task(task)
+
+    def test_no_base_lww_from_caldav_records_caldav_as_base(
+        self, sync_engine, mock_tw
+    ) -> None:
+        """An old-style update from CalDAV records the CalDAV todo as the base."""
+        task, todo = _synced_pair()
+        task.caldav_base = None
+        task.annotations = [{"entry": "20260101T100000Z", "description": "tw only"}]
+        pair = TaskPair(task, todo, SyncAction.UPDATE, SyncDirection.CALDAV_TO_TW, "")
+
+        sync_engine._execute_update(pair)
+
+        imported = mock_tw.import_tasks.call_args.args[0][0]
+        assert decode_base(imported.caldav_base) == snapshot_from_todo(todo)
+
+    def test_create_from_caldav_records_base(self, sync_engine, mock_tw) -> None:
+        """A task created from CalDAV starts with the todo as its base."""
+        _, todo = _synced_pair()
+        pair = TaskPair(None, todo, SyncAction.CREATE, SyncDirection.CALDAV_TO_TW, "")
+
+        sync_engine._execute_create(pair)
+
+        created = mock_tw.create_task.call_args.args[0]
+        assert decode_base(created.caldav_base) == snapshot_from_todo(todo)
+
+    def test_create_to_caldav_records_uid_and_base(
+        self, sync_engine, mock_caldav, mock_tw
+    ) -> None:
+        """A todo created from TaskWarrior links the task and records the base."""
+        task, _ = _synced_pair()
+        task.caldav_uid = task.caldav_base = None
+        pair = TaskPair(task, None, SyncAction.CREATE, SyncDirection.TW_TO_CALDAV, "")
+
+        sync_engine._execute_create(pair)
+
+        created = mock_caldav.create_todo.call_args.args[1]
+        imported = mock_tw.import_tasks.call_args.args[0][0]
+        assert imported.caldav_uid == created.uid
+        assert decode_base(imported.caldav_base) == snapshot_from_task(task)
+        assert task.caldav_uid is None

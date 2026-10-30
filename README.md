@@ -17,12 +17,12 @@ mirrored on [GitHub](https://github.com/admbeck/twcaldav).
 - **Titles stay titles (v1.3.0).** Upstream took the TaskWarrior description
   from a todo's DESCRIPTION (its note) whenever it had one, but compared it
   against SUMMARY. A todo with a note lost its title to the note and was
-  re-imported on every sync. Here the TaskWarrior description always comes
-  from SUMMARY.
+  re-imported on every sync. Here the TaskWarrior description always comes from
+  SUMMARY.
 - **Notes become an annotation (v1.3.0).** The free-text note of a CalDAV todo
-  is imported as one annotation, dated one second before the task's entry so
-  it can't collide with real annotations. Editing the note in CalDAV replaces
-  the annotation and deleting it removes it. It's written back as plain text.
+  is imported as one annotation, dated one second before the task's entry so it
+  can't collide with real annotations. Editing the note in CalDAV replaces the
+  annotation and deleting it removes it. It's written back as plain text.
 - **Readable annotations (v1.3.0).** Annotations are written to the CalDAV
   description as
 
@@ -35,22 +35,35 @@ mirrored on [GitHub](https://github.com/admbeck/twcaldav).
   instead of `--- TaskWarrior Annotations ---` followed by `TIMESTAMP|TEXT`
   lines. The old format is still read, and is rewritten the next time
   TaskWarrior updates the todo.
+
 - **Updates keep CalDAV-only data (v1.3.1).** Upstream rebuilt the whole todo on
-  every update from TaskWarrior, which dropped reminders (VALARM), subtask
-  links (RELATED-TO), client properties such as X-APPLE-SORT-ORDER, and the
-  calendar's VTIMEZONE. Updates now edit the existing todo in place.
-  PERCENT-COMPLETE follows the status, DTSTAMP is refreshed and SEQUENCE is
-  incremented.
+  every update from TaskWarrior, which dropped reminders (VALARM), subtask links
+  (RELATED-TO), client properties such as X-APPLE-SORT-ORDER, and the calendar's
+  VTIMEZONE. Updates now edit the existing todo in place. PERCENT-COMPLETE
+  follows the status, DTSTAMP is refreshed and SEQUENCE is incremented.
+- **Three-way merge (v1.4.0).** Upstream decides each changed task by last write
+  wins: whichever side was modified later overwrites the whole task. Here the
+  state both sides agreed on at the last sync is stored on the TaskWarrior task
+  (the `caldav_base` UDA), and each field is merged against it. A field changed
+  on one side takes that side's value, so edits to different fields on both
+  sides all survive. Tags and annotations are merged as sets, so removing one on
+  either side removes it on the other, and deleting the note annotation deletes
+  the CalDAV note. Only a field changed differently on both sides falls back to
+  last write wins, and that's logged as a warning. The first sync after
+  upgrading records the base on every synced task, one TaskWarrior write each.
+- **TaskWarrior-only fields survive updates (v1.4.0).** `task import` replaces
+  the whole task, so upstream dropped `start`, `depends`, `recur` and other UDAs
+  whenever CalDAV updated a task. They're now written back.
 - **CI.** Codecov is removed, and the tests can also be started by hand with
   `gh workflow run test.yml`.
 
 ### Known limitations
 
-- **Upstream too:** Last write wins per task, not per field. If a task changes
-  on both sides between syncs, the older side's changes are lost.
-- **This fork only:** Removing the note annotation in TaskWarrior doesn't
-  delete the note in CalDAV; the next sync brings it back. Upstream has no note
-  annotation, so this can't happen there.
+- **Upstream too:** If the same field changes differently on both sides between
+  syncs, the side modified last wins. Upstream does this for the whole task, not
+  just the field.
+- **This fork only:** A task first synced by an older version has no base yet,
+  so its first sync after upgrading still uses last write wins per task.
 - **Upstream too:** A date-only DUE becomes a date-time (midnight UTC) once
   TaskWarrior writes the task back.
 - **Upstream too:** RELATED-TO isn't mapped to TaskWarrior `depends`. This fork
@@ -84,8 +97,8 @@ Bidirectional synchronization between TaskWarrior and CalDAV servers.
 - 🖥️ **Multi-Client Support** - Multiple TaskWarrior instances can sync against
   the same CalDAV server.
 - 🎯 **Project Mapping** - One TaskWarrior project maps to one CalDAV calendar.
-- 🔍 **LWW Conflict Resolution** - Timestamp-based conflict resolution. Last
-  Write Wins.
+- 🔍 **Three-Way Merge** - Each field is merged against the last synced state.
+  Last write wins only when both sides changed the same field.
 - 🧪 **Dry Run Mode** - Preview changes before syncing.
 - ✅ **Comprehensive Tests** - Extensive unit tests, plus integration tests
   performed in Docker to replicate actual usage.
@@ -126,6 +139,14 @@ task config uda.caldav_uid.label "CalDAV UID"
 
 This allows twcaldav to store the CalDAV task identifier in your TaskWarrior
 database, enabling proper synchronization across multiple devices.
+
+twcaldav also stores the last synced state in a `caldav_base` attribute. It
+works without being defined, but defining it keeps reports tidy:
+
+```bash
+task config uda.caldav_base.type string
+task config uda.caldav_base.label "CalDAV base"
+```
 
 ### 2. Create Configuration File
 
@@ -188,19 +209,20 @@ systemctl --user enable --now twcaldav.timer
 
 ## Field Mapping
 
-| TaskWarrior      | CalDAV                                             |
-| ---------------- | -------------------------------------------------- |
-| description      | SUMMARY                                            |
-| status           | STATUS (pending→NEEDS-ACTION, completed→COMPLETED) |
-| end              | COMPLETED (completion timestamp)                   |
-| due              | DUE                                                |
-| scheduled        | DTSTART (start date/time)                          |
-| wait             | X-TASKWARRIOR-WAIT (custom property)               |
-| priority         | PRIORITY (H→1, M→5, L→9)                           |
-| project          | CATEGORIES                                         |
-| tags             | CATEGORIES                                         |
-| annotations      | DESCRIPTION (note → one annotation, rest in block) |
-| caldav_uid (UDA) | UID (unique identifier)                            |
+| TaskWarrior       | CalDAV                                             |
+| ----------------- | -------------------------------------------------- |
+| description       | SUMMARY                                            |
+| status            | STATUS (pending→NEEDS-ACTION, completed→COMPLETED) |
+| end               | COMPLETED (completion timestamp)                   |
+| due               | DUE                                                |
+| scheduled         | DTSTART (start date/time)                          |
+| wait              | X-TASKWARRIOR-WAIT (custom property)               |
+| priority          | PRIORITY (H→1, M→5, L→9)                           |
+| project           | CATEGORIES                                         |
+| tags              | CATEGORIES                                         |
+| annotations       | DESCRIPTION (note → one annotation, rest in block) |
+| caldav_uid (UDA)  | UID (unique identifier)                            |
+| caldav_base (UDA) | (last synced state, TaskWarrior only)              |
 
 ## Testing
 

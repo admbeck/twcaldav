@@ -1,9 +1,20 @@
 """Task classification logic for synchronization."""
 
+from dataclasses import replace
+
 from twcaldav.caldav_client import VTodo
 from twcaldav.config import Config
 from twcaldav.logger import get_logger
 from twcaldav.sync_comparator import TaskComparator
+from twcaldav.sync_merge import (
+    build_merged_task,
+    decode_base,
+    encode_base,
+    merge_snapshots,
+    snapshot_from_task,
+    snapshot_from_todo,
+    snapshots_differ,
+)
 from twcaldav.sync_types import SyncAction, SyncDirection, TaskPair
 from twcaldav.taskwarrior import Task
 
@@ -19,9 +30,10 @@ class SyncClassifier:
     def classify(self, tw_task: Task | None, caldav_todo: VTodo | None) -> TaskPair:
         """Classify a task pair and determine sync action.
 
-        Uses hybrid approach:
+        When the task has a base from the last sync, the two sides are merged
+        field by field against it (see sync_merge). Without one:
         1. First checks if content differs (fields comparison)
-        2. If content is identical, skip update (no spurious updates)
+        2. If content is identical, skip update and record the base
         3. If content differs, use Last Write Wins (timestamp) for conflict resolution
 
         Args:
@@ -153,8 +165,12 @@ class SyncClassifier:
                 reason="Both deleted",
             )
 
-        # Check content first, then use timestamps for conflict resolution
-        # Step 1: Compare actual content (not timestamps)
+        base = decode_base(tw_task.caldav_base)
+        if base is not None:
+            return self._merge(tw_task, caldav_todo, base)
+
+        # No base yet (task synced by an older version): compare content, then
+        # use timestamps for conflict resolution
         content_equal = self.comparator.tasks_content_equal(tw_task, caldav_todo)
 
         if content_equal:
@@ -166,14 +182,106 @@ class SyncClassifier:
                 action=SyncAction.SKIP,
                 direction=None,
                 reason="No changes (content identical)",
+                merged=replace(
+                    tw_task,
+                    extra=dict(tw_task.extra),
+                    caldav_base=encode_base(snapshot_from_task(tw_task)),
+                ),
             )
 
-        # Step 2: Content differs - use Last Write Wins for conflict resolution
+        # Content differs - use Last Write Wins for conflict resolution
         self.logger.debug(
             f"Content differs between TW:{tw_task.uuid} and CD:{caldav_todo.uid}"
         )
 
         return self._resolve_conflict(tw_task, caldav_todo)
+
+    def _merge(self, tw_task: Task, caldav_todo: VTodo, base: dict) -> TaskPair:
+        """Classify a pair by merging both sides against their base.
+
+        Args:
+            tw_task: TaskWarrior task.
+            caldav_todo: CalDAV todo.
+            base: Snapshot recorded at the last sync.
+
+        Returns:
+            TaskPair with the merged task and which sides to write.
+        """
+        tw_snapshot = snapshot_from_task(tw_task)
+        cd_snapshot = snapshot_from_todo(caldav_todo)
+        tw_newer = self._tw_is_newer(tw_task, caldav_todo)
+        merged, conflicts = merge_snapshots(base, tw_snapshot, cd_snapshot, tw_newer)
+
+        if conflicts:
+            winner = "TaskWarrior" if tw_newer else "CalDAV"
+            self.logger.warning(
+                f"Conflict on '{tw_task.description}': {', '.join(conflicts)} "
+                f"changed on both sides, keeping the {winner} value"
+            )
+
+        write_tw = snapshots_differ(merged, tw_snapshot)
+        write_caldav = snapshots_differ(merged, cd_snapshot)
+
+        if not write_tw and not write_caldav:
+            # A base without a completion time stays valid, like a side without
+            # one, so TaskWarrior's own end time doesn't cause a rewrite
+            return TaskPair(
+                tw_task=tw_task,
+                caldav_todo=caldav_todo,
+                action=SyncAction.SKIP,
+                direction=None,
+                reason="No changes (content identical)",
+                merged=(
+                    None
+                    if not snapshots_differ(merged, base)
+                    else build_merged_task(tw_task, caldav_todo, merged)
+                ),
+            )
+
+        if write_tw and write_caldav:
+            direction = SyncDirection.BOTH
+            reason = "Merged changes from both sides"
+        elif write_caldav:
+            direction = SyncDirection.TW_TO_CALDAV
+            reason = "Changed in TaskWarrior"
+        else:
+            direction = SyncDirection.CALDAV_TO_TW
+            reason = "Changed in CalDAV"
+        if conflicts:
+            reason += f" (conflict: {', '.join(conflicts)})"
+
+        return TaskPair(
+            tw_task=tw_task,
+            caldav_todo=caldav_todo,
+            action=SyncAction.UPDATE,
+            direction=direction,
+            reason=reason,
+            merged=build_merged_task(tw_task, caldav_todo, merged),
+            write_tw=write_tw,
+            write_caldav=write_caldav,
+        )
+
+    @staticmethod
+    def _tw_is_newer(tw_task: Task, caldav_todo: VTodo) -> bool:
+        """Return whether TaskWarrior was modified after CalDAV.
+
+        Ties and a missing TaskWarrior timestamp go to CalDAV, as in
+        _resolve_conflict.
+
+        Args:
+            tw_task: TaskWarrior task.
+            caldav_todo: CalDAV todo.
+
+        Returns:
+            True if TaskWarrior wins a conflict.
+        """
+        tw_modified = tw_task.modified or tw_task.entry
+        caldav_modified = caldav_todo.last_modified or caldav_todo.created
+        if caldav_modified is None:
+            return True
+        if tw_modified is None:
+            return False
+        return tw_modified.replace(tzinfo=None) > caldav_modified.replace(tzinfo=None)
 
     def _resolve_conflict(self, tw_task: Task, caldav_todo: VTodo) -> TaskPair:
         tw_modified = tw_task.modified or tw_task.entry
