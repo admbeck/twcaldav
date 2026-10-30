@@ -39,7 +39,7 @@ services:
         set -e
         echo '=== Setting up test environment ===' &&
         apt-get update -qq >/dev/null &&
-        apt-get install -y -qq taskwarrior curl ca-certificates >/dev/null &&
+        apt-get install -y -qq taskwarrior tzdata curl ca-certificates >/dev/null &&
         curl -LsSf https://astral.sh/uv/install.sh | sh &&
         export PATH=\"/root/.local/bin:\$PATH\" &&
         echo '=== Installing dependencies ===' &&
