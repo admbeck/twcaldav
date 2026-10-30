@@ -10,6 +10,7 @@ on:
   pull_request:
     branches: [main, master, develop]
   workflow_call:  # Allow this workflow to be called by other workflows
+  workflow_dispatch:  # Allow running manually (gh workflow run test.yml)
 
 jobs:
   lint:
@@ -57,7 +58,7 @@ jobs:
       - name: Run unit tests
         run:
           uv run pytest tests/ -v --ignore=tests/integration --cov=src/twcaldav
-          --cov-report=xml --cov-report=term --junit-xml=unit-test-results.xml
+          --cov-report=term --junit-xml=unit-test-results.xml
 
       - name: Publish Unit Test Results
         uses: EnricoMi/publish-unit-test-result-action@v2
@@ -65,27 +66,6 @@ jobs:
         with:
           files: unit-test-results.xml
           check_name: Unit Test Results
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        if: github.event_name == 'push'
-        with:
-          files: ./coverage.xml
-          flags: unittests
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
-      - name: Upload test results to Codecov
-        uses: codecov/codecov-action@v5
-        if: always()
-        with:
-          files: unit-test-results.xml
-          flags: unittests
-          report_type: test_results
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   integration-tests:
     name: Integration Tests
@@ -95,8 +75,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: sudo apt install docker-compose-v2 -y
+      - name: Check Docker Compose
+        run: docker compose version  # Preinstalled on GitHub-hosted Ubuntu runners
 
       - name: Run integration tests with Docker Compose
         run: bash scripts/run-integration-tests.sh
@@ -107,14 +87,3 @@ jobs:
         with:
           files: test-results.xml
           check_name: Integration Test Results
-
-      - name: Upload test results to Codecov
-        uses: codecov/codecov-action@v5
-        if: always()
-        with:
-          files: test-results.xml
-          flags: integration
-          report_type: test_results
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

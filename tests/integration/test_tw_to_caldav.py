@@ -502,7 +502,7 @@ def test_tw_to_caldav_annotation_create(clean_test_environment) -> None:
     assert todo is not None
     todo_description = get_todo_property(todo, "description")
     assert todo_description is not None
-    assert "--- TaskWarrior Annotations ---" in str(todo_description)
+    assert "Taskwarrior annotations:" in str(todo_description)
     assert annotation_text in str(todo_description)
 
 
